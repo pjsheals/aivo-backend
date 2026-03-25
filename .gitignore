@@ -1,0 +1,7 @@
+/vendor/
+/database/aivo.sqlite
+/storage/logs/*.log
+.env
+.DS_Store
+*.swp
+*.swo
