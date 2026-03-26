@@ -67,3 +67,12 @@ if (!$schema->hasTable('stripe_events')) {
         $table->timestamps();
     });
 }
+// ── Add reset token columns to users (safe — checks first) ──────
+if ($schema->hasTable('users')) {
+    if (!$schema->hasColumn('users', 'reset_token')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->string('reset_token', 64)->nullable();
+            $table->timestamp('reset_token_expiry')->nullable();
+        });
+    }
+}

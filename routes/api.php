@@ -5,6 +5,8 @@ declare(strict_types=1);
 use Aivo\Controllers\CheckoutController;
 use Aivo\Controllers\WebhookController;
 use Aivo\Controllers\HealthController;
+use Aivo\Controllers\OptimizeController;
+use Aivo\Controllers\ProxyController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -15,11 +17,21 @@ $routes = [
     'GET'  => [
         '/'                  => [HealthController::class, 'index'],
         '/api/health'        => [HealthController::class, 'index'],
+        '/api/user-data'     => [OptimizeController::class, 'getUserData'],
     ],
     'POST' => [
+        // Stripe
         '/api/create-checkout-session' => [CheckoutController::class, 'createSession'],
         '/api/verify-session'          => [CheckoutController::class, 'verifySession'],
         '/api/webhook'                 => [WebhookController::class, 'handle'],
+        // User management
+        '/api/register'                => [OptimizeController::class, 'register'],
+        '/api/sync-diagnostic'         => [OptimizeController::class, 'syncDiagnostic'],
+        '/api/forgot-password'         => [OptimizeController::class, 'forgotPassword'],
+        '/api/cancel-subscription'     => [OptimizeController::class, 'cancelSubscription'],
+        '/api/delete-account'          => [OptimizeController::class, 'deleteAccount'],
+        // AI proxy — keys never leave the server
+        '/api/proxy'                   => [ProxyController::class, 'handle'],
     ],
 ];
 
