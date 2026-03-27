@@ -7,6 +7,7 @@ use Aivo\Controllers\WebhookController;
 use Aivo\Controllers\HealthController;
 use Aivo\Controllers\OptimizeController;
 use Aivo\Controllers\ProxyController;
+use Aivo\Controllers\EmailController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -34,7 +35,7 @@ $routes = [
         '/api/probe-event'             => [OptimizeController::class, 'probeEvent'],
         // AI proxy — keys never leave the server
         '/api/proxy'                   => [ProxyController::class, 'handle'],
-    ],
+        '/api/send-email'              => [EmailController::class, 'handle'],
 ];
 
 // ── Dispatch ──────────────────────────────────────────────────────
