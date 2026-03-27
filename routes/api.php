@@ -36,6 +36,7 @@ $routes = [
         // AI proxy — keys never leave the server
         '/api/proxy'                   => [ProxyController::class, 'handle'],
         '/api/send-email'              => [EmailController::class, 'handle'],
+    ],
 ];
 
 // ── Dispatch ──────────────────────────────────────────────────────
