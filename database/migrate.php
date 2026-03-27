@@ -75,4 +75,17 @@ if ($schema->hasTable('users')) {
             $table->timestamp('reset_token_expiry')->nullable();
         });
     }
+}// ── probe_events ─────────────────────────────────────────────────
+if (!$schema->hasTable('probe_events')) {
+    $schema->create('probe_events', function (Blueprint $table) {
+        $table->id();
+        $table->string('brand');
+        $table->string('product')->nullable();
+        $table->string('category');
+        $table->string('status');
+        $table->string('email')->nullable();
+        $table->integer('dsov')->nullable();
+        $table->string('source')->default('beta');
+        $table->timestamps();
+    });
 }

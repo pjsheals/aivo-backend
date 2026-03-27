@@ -18,6 +18,7 @@ $routes = [
         '/'                  => [HealthController::class, 'index'],
         '/api/health'        => [HealthController::class, 'index'],
         '/api/user-data'     => [OptimizeController::class, 'getUserData'],
+        '/api/probe-stats'   => [OptimizeController::class, 'probeStats'],
     ],
     'POST' => [
         // Stripe
@@ -30,6 +31,7 @@ $routes = [
         '/api/forgot-password'         => [OptimizeController::class, 'forgotPassword'],
         '/api/cancel-subscription'     => [OptimizeController::class, 'cancelSubscription'],
         '/api/delete-account'          => [OptimizeController::class, 'deleteAccount'],
+        '/api/probe-event'             => [OptimizeController::class, 'probeEvent'],
         // AI proxy — keys never leave the server
         '/api/proxy'                   => [ProxyController::class, 'handle'],
     ],

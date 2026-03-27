@@ -388,4 +388,115 @@ class OptimizeController
 </html>
 HTML;
     }
-}
+// ── POST /api/probe-event ────────────────────────────────────
+    public function probeEvent(): void
+    {
+        $body = request_body();
+
+        $brand    = isset($body['brand'])    ? trim($body['brand'])    : '';
+        $category = isset($body['category']) ? trim($body['category']) : '';
+        $status   = isset($body['status'])   ? trim($body['status'])   : 'started';
+        $email    = isset($body['email'])    ? strtolower(trim($body['email'])) : null;
+        $dsov     = isset($body['dsov'])     ? (int)$body['dsov']      : null;
+        $source   = isset($body['source'])   ? trim($body['source'])   : 'beta';
+
+        if (!$brand || !$category) {
+            json_response(['status' => 'ok']);
+            return;
+        }
+
+        try {
+            \Illuminate\Database\Capsule\Manager::table('probe_events')->insert([
+                'brand'      => $brand,
+                'product'    => isset($body['product']) ? trim($body['product']) : null,
+                'category'   => $category,
+                'status'     => $status,
+                'email'      => $email,
+                'dsov'       => $dsov,
+                'source'     => $source,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            log_error('[AIVO] probe-event error', ['error' => $e->getMessage()]);
+        }
+
+        json_response(['status' => 'ok']);
+    }
+
+    // ── GET /api/probe-stats ─────────────────────────────────────
+    public function probeStats(): void
+    {
+        $password = $_SERVER['HTTP_X_ADMIN_PASSWORD'] ?? '';
+        if ($password !== env('ADMIN_PASSWORD', 'aivo-admin-2026')) {
+            abort(401, 'Unauthorised');
+        }
+
+        try {
+            $db = \Illuminate\Database\Capsule\Manager::table('probe_events');
+
+            $started   = (clone $db)->where('status', 'started')->count();
+            $completed = (clone $db)->where('status', 'completed')->count();
+            $today     = (clone $db)->where('status', 'started')
+                ->whereDate('created_at', date('Y-m-d'))
+                ->count();
+            $avgDsov   = (clone $db)->where('status', 'completed')
+                ->whereNotNull('dsov')
+                ->avg('dsov');
+
+            $categories = (clone $db)
+                ->selectRaw('category,
+                    COUNT(CASE WHEN status = ? THEN 1 END) as started,
+                    COUNT(CASE WHEN status = ? THEN 1 END) as completed',
+                    ['started', 'completed'])
+                ->groupBy('category')
+                ->orderByRaw('COUNT(*) DESC')
+                ->get()
+                ->map(fn($r) => [
+                    'category'  => $r->category,
+                    'started'   => (int)$r->started,
+                    'completed' => (int)$r->completed,
+                ]);
+
+            $topBrands = (clone $db)
+                ->selectRaw('brand, COUNT(*) as count, AVG(dsov) as avg_dsov')
+                ->groupBy('brand')
+                ->orderByRaw('COUNT(*) DESC')
+                ->limit(10)
+                ->get()
+                ->map(fn($r) => [
+                    'brand'    => $r->brand,
+                    'count'    => (int)$r->count,
+                    'avg_dsov' => $r->avg_dsov !== null ? (int)round($r->avg_dsov) : null,
+                ]);
+
+            $recent = (clone $db)
+                ->orderByDesc('created_at')
+                ->limit(20)
+                ->get()
+                ->map(fn($r) => [
+                    'brand'      => $r->brand,
+                    'category'   => $r->category,
+                    'status'     => $r->status,
+                    'dsov'       => $r->dsov !== null ? (int)$r->dsov : null,
+                    'email'      => $r->email,
+                    'created_at' => $r->created_at,
+                ]);
+
+            json_response([
+                'totals' => [
+                    'started'   => $started,
+                    'completed' => $completed,
+                    'today'     => $today,
+                    'avg_dsov'  => $avgDsov !== null ? (int)round($avgDsov) : null,
+                ],
+                'categories' => $categories,
+                'top_brands' => $topBrands,
+                'recent'     => $recent,
+            ]);
+
+        } catch (\Throwable $e) {
+            log_error('[AIVO] probe-stats error', ['error' => $e->getMessage()]);
+            abort(500, 'Internal error');
+        }
+    }}
