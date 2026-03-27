@@ -20,7 +20,7 @@ try {
 require BASE_PATH . '/src/bootstrap.php';
 
 // ── CORS ─────────────────────────────────────────────────────────
-$allowedOrigins = array_filter(array_map('trim', explode(',', env('ALLOWED_ORIGINS', '*'))));
+$allowedOrigins = array_map('trim', explode(',', env('ALLOWED_ORIGINS', '*')));
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
 if (in_array('*', $allowedOrigins)) {
@@ -28,13 +28,15 @@ if (in_array('*', $allowedOrigins)) {
 } elseif ($origin && in_array($origin, $allowedOrigins)) {
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Vary: Origin');
+} elseif ($origin === 'null' && in_array('null', $allowedOrigins)) {
+    header('Access-Control-Allow-Origin: null');
+    header('Vary: Origin');
 } else {
-    // No match — still allow in dev, block in prod if origin is set
     header('Access-Control-Allow-Origin: ' . (env('APP_ENV') === 'production' ? '' : '*'));
 }
 
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-Admin-Password');
 header('Access-Control-Allow-Credentials: true');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
