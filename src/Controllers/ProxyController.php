@@ -115,13 +115,11 @@ class ProxyController
         }
 
         // ── Stream response back to HTML ─────────────────────────
-        // Normalise everything to OpenAI SSE so the HTML needs
-        // only one parser for all 5 platforms.
         header('Content-Type: text/event-stream');
         header('Cache-Control: no-cache');
         header('X-Accel-Buffering: no');
 
-        $format = $cfg['format']; // capture for closure
+        $format = $cfg['format'];
 
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -137,7 +135,8 @@ class ProxyController
                     $data = substr($line, 6);
                     if ($data === '[DONE]') {
                         echo "data: [DONE]\n\n";
-                        ob_flush(); flush();
+                        if (ob_get_level() > 0) ob_flush();
+                        flush();
                         continue;
                     }
                     try {
@@ -165,7 +164,8 @@ class ProxyController
                         if ($tok !== null) {
                             $out = json_encode(['choices' => [['delta' => ['content' => $tok]]]]);
                             echo "data: {$out}\n\n";
-                            ob_flush(); flush();
+                            if (ob_get_level() > 0) ob_flush();
+                            flush();
                         }
                     } catch (\Throwable $e) {
                         // Skip malformed chunks silently
