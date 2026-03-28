@@ -118,6 +118,22 @@ tr:hover td{background:var(--g2)}
 .ask-response{background:var(--g2);border:1px solid var(--g3);border-radius:6px;padding:16px;font-size:12px;color:var(--g7);line-height:1.7;min-height:80px;white-space:pre-wrap;display:none}
 .ask-response.visible{display:block}
 .ask-response.loading{color:var(--orange);font-family:var(--mono);font-size:11px}
+/* Markdown rendering */
+.ask-response h1,.ask-response h2,.ask-response h3{color:var(--white);font-weight:700;margin:14px 0 6px;font-family:var(--font)}
+.ask-response h1{font-size:15px}.ask-response h2{font-size:13px}.ask-response h3{font-size:12px}
+.ask-response strong{color:var(--white);font-weight:700}
+.ask-response em{color:var(--g7);font-style:italic}
+.ask-response ul,.ask-response ol{margin:8px 0 8px 18px;color:var(--g7)}
+.ask-response li{margin-bottom:4px;line-height:1.6}
+.ask-response p{margin-bottom:10px;color:var(--g7)}
+.ask-response p:last-child{margin-bottom:0}
+.ask-response hr{border:none;border-top:1px solid var(--g3);margin:14px 0}
+/* Chat history */
+.chat-history{display:flex;flex-direction:column;gap:12px;max-height:500px;overflow-y:auto;padding-right:4px}
+.chat-q{background:var(--g3);border-radius:6px;padding:10px 14px;font-size:11px;color:var(--g7);font-style:italic}
+.chat-q::before{content:'You: ';color:var(--orange);font-weight:700;font-style:normal}
+.chat-a{background:var(--g2);border:1px solid var(--g3);border-radius:6px;padding:14px;font-size:12px;color:var(--g7);line-height:1.7}
+.chat-controls{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 
 /* ── Misc ── */
 .spin{width:12px;height:12px;border:2px solid var(--g4);border-top-color:var(--orange);border-radius:50%;animation:rot .65s linear infinite;display:inline-block}
@@ -266,6 +282,10 @@ tr:hover td{background:var(--g2)}
           <button class="qbtn" onclick="askQuestion('Write an executive summary of these findings suitable for a client report')">Client report summary</button>
           <button class="qbtn" onclick="askQuestion('Which competitors are dominating AI search and what does that mean for brands in this category?')">Competitor intelligence</button>
         </div>
+        <div class="chat-controls">
+          <button class="btn btn-g" onclick="clearHistory()" style="font-size:9px;padding:4px 10px">Clear history</button>
+        </div>
+        <div class="chat-history" id="chatHistory"></div>
         <div class="ask-input-row">
           <input class="ask-inp" id="askInput" placeholder="Ask anything — analysis, reports, LinkedIn posts, client summaries..." onkeydown="if(event.key==='Enter')askClaude()">
           <button class="btn btn-p" onclick="askClaude()" id="askBtn">Ask</button>
@@ -281,8 +301,10 @@ tr:hover td{background:var(--g2)}
 const API    = 'https://aivo-backend-production-2184.up.railway.app'
 const ANT    = 'https://api.anthropic.com/v1/messages'
 const PASS   = 'aivo-admin-2026'
+const LS_CHAT = 'aivo_intel_chat'
 let   ANT_KEY = ''
 let   currentData = null
+let   chatHistory = []
 
 // ── LOGIN ──────────────────────────────────────────────
 function login() {
@@ -290,9 +312,7 @@ function login() {
   if (pw === PASS) {
     document.getElementById('loginScreen').style.display = 'none'
     document.getElementById('app').style.display = 'block'
-    // Ask for Anthropic key for Ask Claude feature
-    const key = prompt('Enter your Anthropic API key to enable Ask Claude (sk-ant-...):\n\nLeave blank to skip — dashboard will still work without it.')
-    if (key && key.startsWith('sk-ant-')) ANT_KEY = key
+    loadChatHistory()
     loadData()
   } else {
     document.getElementById('loginErr').style.display = 'block'
@@ -508,6 +528,53 @@ function renderFunnel(d) {
   `
 }
 
+// ── CHAT HISTORY ───────────────────────────────────────
+function loadChatHistory() {
+  try {
+    const saved = localStorage.getItem(LS_CHAT)
+    if (saved) { chatHistory = JSON.parse(saved); renderChatHistory() }
+  } catch(e) {}
+}
+function saveChatHistory() {
+  try { localStorage.setItem(LS_CHAT, JSON.stringify(chatHistory.slice(-20))) } catch(e) {}
+}
+function clearHistory() {
+  chatHistory = []
+  localStorage.removeItem(LS_CHAT)
+  document.getElementById('chatHistory').innerHTML = ''
+}
+function renderChatHistory() {
+  const el = document.getElementById('chatHistory')
+  el.innerHTML = chatHistory.map(h => `
+    <div class="chat-q">${escHtml(h.q)}</div>
+    <div class="chat-a">${renderMarkdown(h.a)}</div>
+  `).join('')
+  el.scrollTop = el.scrollHeight
+}
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+function renderMarkdown(text) {
+  return text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/^### (.+)$/gm,'<h3>$1</h3>')
+    .replace(/^## (.+)$/gm,'<h2>$1</h2>')
+    .replace(/^# (.+)$/gm,'<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/^- (.+)$/gm,'<li>$1</li>')
+    .replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>')
+    .replace(/\n\n/g,'</p><p>')
+    .replace(/^(?!<[h|u|o|l])/gm, '')
+    .split('\n').map(line => {
+      if (line.startsWith('<h') || line.startsWith('<ul') || line.startsWith('<li')) return line
+      if (line.trim() === '') return ''
+      return '<p>' + line + '</p>'
+    }).join('')
+    .replace(/<p><\/p>/g,'')
+    .replace(/<p>(<[hulo])/g,'$1')
+}
+
 // ── ASK CLAUDE ─────────────────────────────────────────
 function askQuestion(q) {
   document.getElementById('askInput').value = q
@@ -527,28 +594,29 @@ async function askClaude() {
   const resp = document.getElementById('askResponse')
   const btn  = document.getElementById('askBtn')
   resp.className = 'ask-response visible loading'
-  resp.textContent = 'Analysing your probe data...'
+  resp.textContent = 'Analysing...'
   btn.disabled = true
+  document.getElementById('askInput').value = ''
 
   const dataContext = currentData ? JSON.stringify(currentData, null, 2) : 'No data loaded'
 
-  const sys = `You are a senior analyst at AIVO Optimize, an AI search intelligence company. 
-You have deep expertise in AI decision-stage brand visibility, CODA scoring methodology, and marketing intelligence.
+  const sys = `You are a senior analyst at AIVO Optimize, an AI search intelligence company.
+You have deep expertise in AI decision-stage brand visibility, CODA/DSOV scoring methodology, and marketing intelligence.
 You are direct, insightful and commercially minded. You speak to brand marketers and CMOs.
 When writing reports or LinkedIn posts, use AIVO Optimize's voice: authoritative, data-driven, without hype.
+Use markdown formatting — bold key points, use headers for sections, bullet points for lists.
 American English throughout.`
 
   const msg = `Here is the current probe data from our AIVO Optimize system:
 
 ${dataContext}
 
-Context on the data:
-- DSOV (Decision-Stage Outcome Visibility) score: 0-100. Bands: Strong ≥70, At Risk 40-69, Eliminated <40
-- Scoring: T1 (First Prompt) = 15pts, T2 (Follow Up 1) = 15pts, T3 (Follow Up 2) = 20pts, T4 (Purchase Decision) = 50pts
+Context:
+- DSOV score: 0-100. Strong ≥70, At Risk 40-69, Eliminated <40
+- T1 (First Prompt)=15pts, T2 (Follow Up 1)=15pts, T3 (Follow Up 2)=20pts, T4 (Purchase Decision)=50pts
 - Averaged across ChatGPT and Perplexity
-- Displacement turn = the stage where the brand dropped out of the buying sequence
-- top_t4_winners = brands that won the Purchase Decision when the tested brand didn't
-- All probes are in Beauty & Skincare category unless filtered otherwise
+- displacement_turn = stage where brand dropped out
+- top_t4_winners = brands winning Purchase Decision when tested brand didn't
 
 Question: ${q}`
 
@@ -563,7 +631,7 @@ Question: ${q}`
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1200,
+        max_tokens: 1500,
         system: sys,
         messages: [{ role: 'user', content: msg }]
       })
@@ -571,8 +639,15 @@ Question: ${q}`
 
     const data = await res.json()
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('')
-    resp.className = 'ask-response visible'
-    resp.textContent = text
+
+    // Add to history
+    chatHistory.push({ q, a: text })
+    saveChatHistory()
+    renderChatHistory()
+
+    resp.className = 'ask-response'
+    resp.textContent = ''
+
   } catch(e) {
     resp.className = 'ask-response visible'
     resp.textContent = 'Error: ' + e.message
