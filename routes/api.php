@@ -39,7 +39,6 @@ $routes = [
         '/api/send-email'              => [EmailController::class, 'handle'],
         '/api/probe-data'              => [ProbeDataController::class, 'store'],
         '/api/probe-data/stats'        => [ProbeDataController::class, 'stats'],
-    ],
 ];
 
 // ── Dispatch ──────────────────────────────────────────────────────

@@ -134,3 +134,49 @@ if (!$schema->hasTable('agent_probes')) {
         $table->index('created_at');
     });
 }
+
+// ── agent_probes ─────────────────────────────────────────────────
+if (!$schema->hasTable('agent_probes')) {
+    $schema->create('agent_probes', function (Blueprint $table) {
+        $table->id();
+        $table->string('brand');
+        $table->string('category');
+        $table->string('vertical')->nullable();
+        $table->integer('dsov_score');
+        $table->string('band');
+        $table->integer('oai_score')->nullable();
+        $table->integer('pplx_score')->nullable();
+        $table->boolean('t1_validated')->default(false);
+        $table->boolean('t1_present_oai')->default(false);
+        $table->boolean('t1_present_pplx')->default(false);
+        $table->boolean('t2_survives')->default(false);
+        $table->boolean('t3_survives')->default(false);
+        $table->boolean('t4_wins')->default(false);
+        $table->boolean('oai_wins_t4')->default(false);
+        $table->boolean('pplx_wins_t4')->default(false);
+        $table->string('displacement_turn')->nullable();
+        $table->json('t2_competitors')->nullable();
+        $table->string('t4_winner')->nullable();
+        $table->bigInteger('rar_annual')->nullable();
+        $table->bigInteger('rar_monthly')->nullable();
+        $table->bigInteger('revenue_used')->nullable();
+        $table->string('contact_email')->nullable();
+        $table->string('contact_seniority')->nullable();
+        $table->string('contact_state')->nullable();
+        $table->string('contact_company')->nullable();
+        $table->boolean('email_sent')->default(false);
+        $table->timestamp('email_sent_at')->nullable();
+        $table->string('email_type')->nullable();
+        $table->string('source')->default('agent_paul');
+        $table->boolean('is_repeat')->default(false);
+        $table->unsignedBigInteger('previous_probe_id')->nullable();
+        $table->string('probe_version')->default('v1');
+        $table->timestamps();
+        $table->index('brand');
+        $table->index('category');
+        $table->index('band');
+        $table->index('displacement_turn');
+        $table->index('source');
+        $table->index('created_at');
+    });
+}
