@@ -111,7 +111,7 @@ class ProbeDataController
             exit;
         }
 
-        $avgDsov    = round((clone $query)->avg('dsov_score'), 1);
+        $avgDsov    = round((float)(clone $query)->avg('dsov_score'), 1);
         $bands      = (clone $query)->selectRaw('band, count(*) as count')->groupBy('band')->get();
         $validated  = (clone $query)->where('t1_validated', true)->count();
         $displaced  = (clone $query)->where('t1_validated', true)->where('t4_wins', false)->count();
