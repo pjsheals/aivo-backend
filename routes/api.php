@@ -21,6 +21,7 @@ $routes = [
         '/api/health'        => [HealthController::class, 'index'],
         '/api/user-data'     => [OptimizeController::class, 'getUserData'],
         '/api/probe-stats'   => [OptimizeController::class, 'probeStats'],
+        '/api/probe-data/stats' => [ProbeDataController::class, 'stats'],
     ],
     'POST' => [
         // Stripe
