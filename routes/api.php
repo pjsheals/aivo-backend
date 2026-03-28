@@ -19,6 +19,7 @@ $routes = [
     'GET'  => [
         '/'                  => [HealthController::class, 'index'],
         '/api/health'        => [HealthController::class, 'index'],
+        '/probe-intelligence'  => [HealthController::class, 'dashboard'],
         '/api/user-data'     => [OptimizeController::class, 'getUserData'],
         '/api/probe-stats'   => [OptimizeController::class, 'probeStats'],
         '/api/probe-data/stats' => [ProbeDataController::class, 'stats'],

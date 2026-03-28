@@ -15,4 +15,19 @@ class HealthController
             'time'    => date('c'),
         ]);
     }
+
+// Appended
+
+    public function dashboard(): void
+    {
+        $file = BASE_PATH . '/public/probe-intelligence.html';
+        if (!file_exists($file)) {
+            http_response_code(404);
+            echo 'Dashboard not found';
+            exit;
+        }
+        header('Content-Type: text/html; charset=utf-8');
+        readfile($file);
+        exit;
+    }
 }

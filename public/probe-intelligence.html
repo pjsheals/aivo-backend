@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIVO Optimize — Probe Intelligence</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --black:#000;--orange:#FC8337;--od:rgba(252,131,55,0.12);--om:rgba(252,131,55,0.3);
+  --white:#fff;--g1:#0d0d0d;--g2:#161616;--g3:#1e1e1e;--g4:#2a2a2a;--g5:#444;--g6:#777;--g7:#aaa;
+  --green:#22c55e;--gd:rgba(34,197,94,0.12);--red:#ef4444;--rd:rgba(239,68,68,0.12);
+  --yellow:#eab308;--yd:rgba(234,179,8,0.1);
+  --font:'Montserrat',sans-serif;--mono:'Roboto Mono',monospace;
+}
+html,body{min-height:100vh;background:var(--black);color:var(--white);font-family:var(--font)}
+
+/* ── Login ── */
+#loginScreen{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--black)}
+.login-box{background:var(--g1);border:1px solid var(--g3);border-radius:10px;padding:48px;width:380px;text-align:center}
+.login-logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:32px}
+.login-tri{width:28px;height:28px;background:var(--orange);clip-path:polygon(50% 0%,100% 100%,0% 100%)}
+.login-name{font-size:13px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+.login-title{font-size:18px;font-weight:700;margin-bottom:8px}
+.login-sub{font-size:12px;color:var(--g6);margin-bottom:28px}
+.login-inp{width:100%;background:var(--g2);border:1px solid var(--g4);color:var(--white);padding:11px 14px;border-radius:5px;font-family:var(--mono);font-size:13px;outline:none;margin-bottom:12px;letter-spacing:.12em}
+.login-inp:focus{border-color:var(--orange)}
+.login-btn{width:100%;background:var(--orange);color:var(--black);border:none;border-radius:5px;padding:12px;font-family:var(--font);font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:background .2s}
+.login-btn:hover{background:#ff9050}
+.login-err{color:var(--red);font-size:11px;margin-top:10px;display:none}
+
+/* ── Main App ── */
+#app{display:none}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:0 28px;height:56px;border-bottom:1px solid var(--g3);background:var(--g1);position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:9px}
+.logo-tri{width:22px;height:22px;background:var(--orange);clip-path:polygon(50% 0%,100% 100%,0% 100%)}
+.logo-name{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+.logo-sub{font-size:9px;color:var(--g6);letter-spacing:.12em;text-transform:uppercase;margin-top:1px}
+.topbar-right{display:flex;align-items:center;gap:12px}
+.last-update{font-size:10px;color:var(--g6);font-family:var(--mono)}
+
+/* ── Filters ── */
+.filters{display:flex;align-items:center;gap:10px;padding:14px 28px;border-bottom:1px solid var(--g3);background:var(--g1);flex-wrap:wrap}
+.filter-label{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--g6)}
+.sel{background:var(--g2);border:1px solid var(--g4);color:var(--white);padding:7px 12px;border-radius:4px;font-family:var(--font);font-size:11px;font-weight:600;outline:none}
+.sel:focus{border-color:var(--orange)}
+.sel option{background:var(--g2)}
+.btn{padding:7px 16px;border-radius:4px;font-family:var(--font);font-size:10px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;cursor:pointer;border:none;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+.btn-p{background:var(--orange);color:var(--black)}
+.btn-p:hover{background:#ff9050}
+.btn-g{background:transparent;color:var(--white);border:1px solid var(--g4)}
+.btn-g:hover{border-color:var(--g5)}
+
+/* ── Main layout ── */
+.main{padding:24px 28px;display:flex;flex-direction:column;gap:20px}
+
+/* ── Stat cards ── */
+.stat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+@media(max-width:1000px){.stat-grid{grid-template-columns:repeat(3,1fr)}}
+.stat-card{background:var(--g1);border:1px solid var(--g3);border-radius:8px;padding:20px}
+.stat-val{font-size:30px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
+.stat-lbl{font-size:9px;font-weight:700;color:var(--g5);text-transform:uppercase;letter-spacing:.1em;margin-top:4px}
+.stat-sub{font-size:10px;font-weight:600;margin-top:6px}
+.stat-sub.pos{color:var(--green)}
+.stat-sub.warn{color:var(--yellow)}
+.stat-sub.neu{color:var(--g6)}
+.bar-track{height:3px;background:var(--g3);border-radius:2px;overflow:hidden;margin-top:8px}
+.bar-fill{height:100%;background:var(--orange);border-radius:2px;transition:width .8s}
+
+/* ── Charts grid ── */
+.charts-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+@media(max-width:1100px){.charts-grid{grid-template-columns:1fr 1fr}}
+.chart-card{background:var(--g1);border:1px solid var(--g3);border-radius:8px;padding:20px}
+.chart-title{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--g6);margin-bottom:16px}
+.chart-wrap{position:relative;height:180px}
+
+/* ── Tables ── */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:900px){.two-col{grid-template-columns:1fr}}
+.table-card{background:var(--g1);border:1px solid var(--g3);border-radius:8px;overflow:hidden}
+.table-hd{padding:12px 18px;border-bottom:1px solid var(--g3);font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--g6)}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{text-align:left;padding:8px 14px;font-size:9px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--g6);border-bottom:1px solid var(--g3)}
+td{padding:9px 14px;border-bottom:1px solid var(--g2);color:var(--g7)}
+td.b{color:var(--white);font-weight:600}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--g2)}
+.badge{display:inline-block;padding:2px 7px;border-radius:3px;font-size:9px;font-weight:700;text-transform:uppercase}
+.bh{background:var(--gd);color:var(--green)}
+.by{background:var(--yd);color:var(--yellow)}
+.br{background:var(--rd);color:var(--red)}
+.bo{background:var(--g3);color:var(--g6)}
+
+/* ── Displacement funnel ── */
+.funnel{display:flex;flex-direction:column;gap:8px;padding:4px 0}
+.funnel-row{display:flex;align-items:center;gap:10px}
+.funnel-label{font-size:10px;font-weight:700;color:var(--g7);width:120px;flex-shrink:0}
+.funnel-bar-wrap{flex:1;background:var(--g3);border-radius:3px;height:22px;overflow:hidden;position:relative}
+.funnel-bar-fill{height:100%;border-radius:3px;transition:width .8s;display:flex;align-items:center;padding-left:8px}
+.funnel-bar-val{font-size:10px;font-weight:700;color:var(--black)}
+.funnel-pct{font-size:10px;font-weight:700;color:var(--g6);width:40px;text-align:right;flex-shrink:0}
+
+/* ── Ask Claude panel ── */
+.ask-panel{background:var(--g1);border:1px solid var(--g3);border-radius:8px;overflow:hidden}
+.ask-header{padding:14px 20px;border-bottom:1px solid var(--g3);display:flex;align-items:center;justify-content:space-between}
+.ask-title{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--g6);display:flex;align-items:center;gap:8px}
+.ask-title-badge{background:var(--od);color:var(--orange);border:1px solid var(--om);padding:2px 8px;border-radius:10px;font-size:9px;font-weight:700}
+.ask-body{padding:20px;display:flex;flex-direction:column;gap:12px}
+.quick-btns{display:flex;gap:8px;flex-wrap:wrap}
+.qbtn{background:var(--g2);border:1px solid var(--g4);color:var(--g7);padding:6px 12px;border-radius:4px;font-family:var(--font);font-size:10px;font-weight:600;cursor:pointer;transition:all .2s}
+.qbtn:hover{border-color:var(--orange);color:var(--orange)}
+.ask-input-row{display:flex;gap:8px}
+.ask-inp{flex:1;background:var(--g2);border:1px solid var(--g4);color:var(--white);padding:10px 14px;border-radius:5px;font-family:var(--font);font-size:12px;outline:none}
+.ask-inp:focus{border-color:var(--orange)}
+.ask-inp::placeholder{color:var(--g5)}
+.ask-response{background:var(--g2);border:1px solid var(--g3);border-radius:6px;padding:16px;font-size:12px;color:var(--g7);line-height:1.7;min-height:80px;white-space:pre-wrap;display:none}
+.ask-response.visible{display:block}
+.ask-response.loading{color:var(--orange);font-family:var(--mono);font-size:11px}
+
+/* ── Misc ── */
+.spin{width:12px;height:12px;border:2px solid var(--g4);border-top-color:var(--orange);border-radius:50%;animation:rot .65s linear infinite;display:inline-block}
+@keyframes rot{to{transform:rotate(360deg)}}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:var(--g1)}
+::-webkit-scrollbar-thumb{background:var(--g4);border-radius:2px}
+.empty{padding:32px;text-align:center;color:var(--g5);font-size:11px}
+.section-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.section-title{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--g5)}
+</style>
+</head>
+<body>
+
+<!-- ── LOGIN ── -->
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="login-tri"></div>
+      <div class="login-name">AIVO Optimize</div>
+    </div>
+    <div class="login-title">Probe Intelligence</div>
+    <div class="login-sub">Internal analytics dashboard</div>
+    <input class="login-inp" id="pwInput" type="password" placeholder="Password" onkeydown="if(event.key==='Enter')login()">
+    <button class="login-btn" onclick="login()">Access Dashboard →</button>
+    <div class="login-err" id="loginErr">Incorrect password</div>
+  </div>
+</div>
+
+<!-- ── APP ── -->
+<div id="app">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="logo">
+      <div class="logo-tri"></div>
+      <div>
+        <div class="logo-name">AIVO Optimize</div>
+        <div class="logo-sub">Probe Intelligence Dashboard</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="last-update" id="lastUpdate">—</span>
+      <button class="btn btn-g" onclick="loadData()" style="font-size:10px;padding:6px 14px">↻ Refresh</button>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="filters">
+    <span class="filter-label">Period</span>
+    <select class="sel" id="filterDays" onchange="loadData()">
+      <option value="7">Last 7 days</option>
+      <option value="30" selected>Last 30 days</option>
+      <option value="60">Last 60 days</option>
+      <option value="90">Last 90 days</option>
+    </select>
+    <span class="filter-label" style="margin-left:8px">Category</span>
+    <select class="sel" id="filterCategory" onchange="loadData()">
+      <option value="">All Categories</option>
+      <option value="Beauty & Skincare">Beauty & Skincare</option>
+      <option value="Consumer Electronics">Consumer Electronics</option>
+      <option value="Fashion & Apparel">Fashion & Apparel</option>
+      <option value="Financial Services">Financial Services</option>
+      <option value="Food & Beverage">Food & Beverage</option>
+      <option value="Health & Wellness">Health & Wellness</option>
+      <option value="SaaS / Technology">SaaS / Technology</option>
+      <option value="Retail">Retail</option>
+    </select>
+    <span class="filter-label" style="margin-left:8px">Source</span>
+    <select class="sel" id="filterSource" onchange="loadData()">
+      <option value="">All Agents</option>
+      <option value="agent_paul">Paul</option>
+      <option value="agent_tim">Tim</option>
+      <option value="beta">Beta Probe</option>
+    </select>
+  </div>
+
+  <div class="main">
+
+    <!-- Stat cards -->
+    <div class="stat-grid" id="statGrid">
+      <div class="stat-card"><div class="stat-val" id="sTotal" style="color:var(--orange)">—</div><div class="stat-lbl">Total Probes</div><div class="stat-sub neu" id="sTotalSub">Loading...</div></div>
+      <div class="stat-card"><div class="stat-val" id="sAvgDsov">—</div><div class="stat-lbl">Avg DSOV Score</div><div class="stat-sub neu" id="sAvgBand">—</div></div>
+      <div class="stat-card"><div class="stat-val" style="color:var(--red)" id="sDisplaced">—</div><div class="stat-lbl">Displaced</div><div class="stat-sub warn" id="sDisplacedPct">—% validated but lost</div><div class="bar-track"><div class="bar-fill" id="sDisplacedBar" style="width:0%"></div></div></div>
+      <div class="stat-card"><div class="stat-val" style="color:var(--green)" id="sWon">—</div><div class="stat-lbl">Won T4</div><div class="stat-sub pos" id="sWonPct">—% win rate</div><div class="bar-track"><div class="bar-fill" id="sWonBar" style="width:0%;background:var(--green)"></div></div></div>
+      <div class="stat-card"><div class="stat-val" style="color:var(--yellow)" id="sRepeats">—</div><div class="stat-lbl">Repeat Probes</div><div class="stat-sub neu" id="sVolatility">—% T1 volatility</div></div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-title">Band Distribution</div>
+        <div class="chart-wrap"><canvas id="chartBands"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Displacement Stage</div>
+        <div class="chart-wrap"><canvas id="chartDisp"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Performance by Category</div>
+        <div class="chart-wrap"><canvas id="chartCat"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Displacement funnel + Top competitors -->
+    <div class="two-col">
+      <div class="table-card">
+        <div class="table-hd">Decision-Stage Funnel</div>
+        <div style="padding:18px" id="funnelWrap">
+          <div class="empty">Loading...</div>
+        </div>
+      </div>
+      <div class="table-card">
+        <div class="table-hd">Top T4 Winners (brands displacing yours)</div>
+        <table>
+          <thead><tr><th>Brand winning Purchase Decision</th><th>Count</th><th></th></tr></thead>
+          <tbody id="t4Table"><tr><td colspan="3" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Category breakdown -->
+    <div class="table-card">
+      <div class="table-hd">By Category</div>
+      <table>
+        <thead><tr><th>Category</th><th>Probes</th><th>Avg DSOV</th><th>Won T4</th><th>Win Rate</th><th>Band</th></tr></thead>
+        <tbody id="catTable"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- Ask Claude -->
+    <div class="ask-panel">
+      <div class="ask-header">
+        <div class="ask-title">
+          Ask Claude
+          <span class="ask-title-badge">AI Analysis</span>
+        </div>
+        <div style="font-size:10px;color:var(--g6)">Ask anything about your probe data</div>
+      </div>
+      <div class="ask-body">
+        <div class="quick-btns">
+          <button class="qbtn" onclick="askQuestion('What are the key insights from this probe data and what should I prioritise?')">Key insights</button>
+          <button class="qbtn" onclick="askQuestion('Which category shows the worst AI displacement and why might that be?')">Worst category</button>
+          <button class="qbtn" onclick="askQuestion('Write a LinkedIn post based on these probe findings')">LinkedIn post</button>
+          <button class="qbtn" onclick="askQuestion('What does the displacement stage data tell us about where brands are losing?')">Displacement analysis</button>
+          <button class="qbtn" onclick="askQuestion('Write an executive summary of these findings suitable for a client report')">Client report summary</button>
+          <button class="qbtn" onclick="askQuestion('Which competitors are dominating AI search and what does that mean for brands in this category?')">Competitor intelligence</button>
+        </div>
+        <div class="ask-input-row">
+          <input class="ask-inp" id="askInput" placeholder="Ask anything — analysis, reports, LinkedIn posts, client summaries..." onkeydown="if(event.key==='Enter')askClaude()">
+          <button class="btn btn-p" onclick="askClaude()" id="askBtn">Ask</button>
+        </div>
+        <div class="ask-response" id="askResponse"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API    = 'https://aivo-backend-production-2184.up.railway.app'
+const ANT    = 'https://api.anthropic.com/v1/messages'
+const PASS   = 'aivo-admin-2026'
+let   ANT_KEY = ''
+let   currentData = null
+
+// ── LOGIN ──────────────────────────────────────────────
+function login() {
+  const pw = document.getElementById('pwInput').value
+  if (pw === PASS) {
+    document.getElementById('loginScreen').style.display = 'none'
+    document.getElementById('app').style.display = 'block'
+    // Ask for Anthropic key for Ask Claude feature
+    const key = prompt('Enter your Anthropic API key to enable Ask Claude (sk-ant-...):\n\nLeave blank to skip — dashboard will still work without it.')
+    if (key && key.startsWith('sk-ant-')) ANT_KEY = key
+    loadData()
+  } else {
+    document.getElementById('loginErr').style.display = 'block'
+    document.getElementById('pwInput').value = ''
+  }
+}
+document.getElementById('pwInput').addEventListener('keydown', e => { if (e.key === 'Enter') login() })
+
+// ── LOAD DATA ──────────────────────────────────────────
+async function loadData() {
+  const days     = document.getElementById('filterDays').value
+  const category = document.getElementById('filterCategory').value
+  const source   = document.getElementById('filterSource').value
+
+  let url = `${API}/api/probe-data/stats?pw=${PASS}&days=${days}`
+  if (category) url += `&category=${encodeURIComponent(category)}`
+  if (source)   url += `&source=${source}`
+
+  try {
+    const res  = await fetch(url)
+    const data = await res.json()
+    currentData = data
+    renderDashboard(data)
+    document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString('en-GB')
+  } catch(e) {
+    console.error('Load error:', e)
+  }
+}
+
+// ── RENDER ─────────────────────────────────────────────
+function renderDashboard(d) {
+  if (!d || d.total === 0) {
+    document.getElementById('sTotal').textContent = '0'
+    document.getElementById('sTotalSub').textContent = 'No data in period'
+    return
+  }
+
+  const total    = d.total_probes || 0
+  const avgDsov  = parseFloat(d.avg_dsov) || 0
+  const displaced = d.displaced || 0
+  const won      = d.won_t4 || 0
+  const repeats  = d.repeat_probes || 0
+  const volPct   = d.t1_volatility_pct || 0
+
+  // Stat cards
+  document.getElementById('sTotal').textContent      = total
+  document.getElementById('sTotalSub').textContent   = `${document.getElementById('filterDays').value} day period`
+  document.getElementById('sAvgDsov').textContent    = avgDsov.toFixed(1)
+  document.getElementById('sAvgBand').textContent    = avgDsov >= 70 ? 'Strong avg' : avgDsov >= 40 ? 'At Risk avg' : 'Eliminated avg'
+  document.getElementById('sAvgDsov').style.color    = avgDsov >= 70 ? 'var(--green)' : avgDsov >= 40 ? 'var(--yellow)' : 'var(--red)'
+  document.getElementById('sDisplaced').textContent  = displaced
+  document.getElementById('sDisplacedPct').textContent = `${d.displaced_pct || 0}% validated but lost`
+  document.getElementById('sDisplacedBar').style.width = `${d.displaced_pct || 0}%`
+  document.getElementById('sWon').textContent        = won
+  document.getElementById('sWonPct').textContent     = `${d.won_t4_pct || 0}% win rate`
+  document.getElementById('sWonBar').style.width     = `${d.won_t4_pct || 0}%`
+  document.getElementById('sRepeats').textContent    = repeats
+  document.getElementById('sVolatility').textContent = `${volPct}% T1 volatility`
+
+  // Charts
+  renderBandChart(d.bands || [])
+  renderDispChart(d.displacement_stages || [])
+  renderCatChart(d.by_category || [])
+
+  // Funnel
+  renderFunnel(d)
+
+  // T4 winners table
+  const t4 = d.top_t4_winners || []
+  document.getElementById('t4Table').innerHTML = t4.length
+    ? t4.map((w,i) => `<tr>
+        <td class="b">${w.t4_winner || 'Unknown'}</td>
+        <td style="color:var(--orange);font-weight:700;font-family:var(--mono)">${w.count}</td>
+        <td><div style="background:var(--g3);border-radius:2px;height:6px;width:${Math.round(w.count/t4[0].count*100)}px;max-width:80px;background:var(--orange)"></div></td>
+      </tr>`).join('')
+    : '<tr><td colspan="3" class="empty">No displacement data yet</td></tr>'
+
+  // Category table
+  const cats = d.by_category || []
+  document.getElementById('catTable').innerHTML = cats.length
+    ? cats.map(c => {
+        const avg  = parseFloat(c.avg_dsov) || 0
+        const wins = parseInt(c.wins) || 0
+        const tot  = parseInt(c.total) || 1
+        const wr   = Math.round(wins/tot*100)
+        const band = avg >= 70 ? ['bh','Strong'] : avg >= 40 ? ['by','At Risk'] : ['br','Eliminated']
+        return `<tr>
+          <td class="b">${c.category}</td>
+          <td style="font-family:var(--mono)">${c.total}</td>
+          <td style="font-weight:700;color:${avg>=70?'var(--green)':avg>=40?'var(--yellow)':'var(--red)'};font-family:var(--mono)">${avg.toFixed(1)}</td>
+          <td style="font-family:var(--mono)">${wins}</td>
+          <td style="font-family:var(--mono)">${wr}%</td>
+          <td><span class="badge ${band[0]}">${band[1]}</span></td>
+        </tr>`
+      }).join('')
+    : '<tr><td colspan="6" class="empty">No category data yet</td></tr>'
+}
+
+// ── CHARTS ─────────────────────────────────────────────
+let chartBands, chartDisp, chartCat
+
+function renderBandChart(bands) {
+  const labels = bands.map(b => b.band)
+  const values = bands.map(b => parseInt(b.count))
+  const colors = bands.map(b => b.band === 'Strong' ? '#22c55e' : b.band === 'At Risk' ? '#eab308' : '#ef4444')
+
+  if (chartBands) chartBands.destroy()
+  chartBands = new Chart(document.getElementById('chartBands'), {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#777', font: { family: 'Roboto Mono', size: 10 }, padding: 12 } }
+      }
+    }
+  })
+}
+
+function renderDispChart(stages) {
+  const order = ['T1','T2','T3','T4',null]
+  const labels = ['Lost T1','Lost T2','Lost T3','Lost T4','Won']
+  const colorMap = {'T1':'#ef4444','T2':'#f97316','T3':'#eab308','T4':'#84cc16',null:'#22c55e'}
+  const values = order.map(k => {
+    const found = stages.find(s => s.displacement_turn === k)
+    return found ? parseInt(found.count) : 0
+  })
+
+  if (chartDisp) chartDisp.destroy()
+  chartDisp = new Chart(document.getElementById('chartDisp'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: order.map(k => colorMap[k]),
+        borderRadius: 4, borderWidth: 0
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#777', font: { size: 9 } }, grid: { color: '#1e1e1e' } },
+        y: { ticks: { color: '#777', font: { size: 9 } }, grid: { color: '#1e1e1e' } }
+      }
+    }
+  })
+}
+
+function renderCatChart(cats) {
+  const labels = cats.map(c => c.category.replace(' & ', '\n& '))
+  const values = cats.map(c => parseFloat(c.avg_dsov) || 0)
+  const colors = values.map(v => v >= 70 ? '#22c55e' : v >= 40 ? '#eab308' : '#ef4444')
+
+  if (chartCat) chartCat.destroy()
+  chartCat = new Chart(document.getElementById('chartCat'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Avg DSOV',
+        data: values,
+        backgroundColor: colors,
+        borderRadius: 4, borderWidth: 0
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#777', font: { size: 9 } }, grid: { color: '#1e1e1e' } },
+        y: { min: 0, max: 100, ticks: { color: '#777', font: { size: 9 } }, grid: { color: '#1e1e1e' } }
+      }
+    }
+  })
+}
+
+function renderFunnel(d) {
+  const total = d.total_probes || 1
+  const t1    = d.validated_t1 || 0
+  const stages = d.displacement_stages || []
+  const getCount = key => parseInt((stages.find(s => s.displacement_turn === key) || {}).count || 0)
+
+  const t1Lost = getCount('T1')
+  const t2Lost = getCount('T2')
+  const t3Lost = getCount('T3')
+  const t4Lost = getCount('T4')
+  const won    = d.won_t4 || 0
+
+  const rows = [
+    { label: 'First Prompt',       val: total,        pct: 100,                           color: '#FC8337' },
+    { label: 'Follow Up Prompt 1', val: total-t1Lost, pct: Math.round((total-t1Lost)/total*100), color: '#f97316' },
+    { label: 'Follow Up Prompt 2', val: total-t1Lost-t2Lost, pct: Math.round((total-t1Lost-t2Lost)/total*100), color: '#eab308' },
+    { label: 'Purchase Decision',  val: total-t1Lost-t2Lost-t3Lost, pct: Math.round((total-t1Lost-t2Lost-t3Lost)/total*100), color: '#84cc16' },
+    { label: 'Won',                val: won,          pct: Math.round(won/total*100),      color: '#22c55e' },
+  ]
+
+  document.getElementById('funnelWrap').innerHTML = `
+    <div class="funnel">
+      ${rows.map(r => `
+        <div class="funnel-row">
+          <div class="funnel-label">${r.label}</div>
+          <div class="funnel-bar-wrap">
+            <div class="funnel-bar-fill" style="width:${r.pct}%;background:${r.color}">
+              <span class="funnel-bar-val">${r.val}</span>
+            </div>
+          </div>
+          <div class="funnel-pct">${r.pct}%</div>
+        </div>
+      `).join('')}
+    </div>
+  `
+}
+
+// ── ASK CLAUDE ─────────────────────────────────────────
+function askQuestion(q) {
+  document.getElementById('askInput').value = q
+  askClaude()
+}
+
+async function askClaude() {
+  const q = document.getElementById('askInput').value.trim()
+  if (!q) return
+
+  if (!ANT_KEY) {
+    const key = prompt('Enter your Anthropic API key (sk-ant-...) to use Ask Claude:')
+    if (key && key.startsWith('sk-ant-')) ANT_KEY = key
+    else return
+  }
+
+  const resp = document.getElementById('askResponse')
+  const btn  = document.getElementById('askBtn')
+  resp.className = 'ask-response visible loading'
+  resp.textContent = 'Analysing your probe data...'
+  btn.disabled = true
+
+  const dataContext = currentData ? JSON.stringify(currentData, null, 2) : 'No data loaded'
+
+  const sys = `You are a senior analyst at AIVO Optimize, an AI search intelligence company. 
+You have deep expertise in AI decision-stage brand visibility, CODA scoring methodology, and marketing intelligence.
+You are direct, insightful and commercially minded. You speak to brand marketers and CMOs.
+When writing reports or LinkedIn posts, use AIVO Optimize's voice: authoritative, data-driven, without hype.
+American English throughout.`
+
+  const msg = `Here is the current probe data from our AIVO Optimize system:
+
+${dataContext}
+
+Context on the data:
+- DSOV (Decision-Stage Outcome Visibility) score: 0-100. Bands: Strong ≥70, At Risk 40-69, Eliminated <40
+- Scoring: T1 (First Prompt) = 15pts, T2 (Follow Up 1) = 15pts, T3 (Follow Up 2) = 20pts, T4 (Purchase Decision) = 50pts
+- Averaged across ChatGPT and Perplexity
+- Displacement turn = the stage where the brand dropped out of the buying sequence
+- top_t4_winners = brands that won the Purchase Decision when the tested brand didn't
+- All probes are in Beauty & Skincare category unless filtered otherwise
+
+Question: ${q}`
+
+  try {
+    const res = await fetch(ANT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANT_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1200,
+        system: sys,
+        messages: [{ role: 'user', content: msg }]
+      })
+    })
+
+    const data = await res.json()
+    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('')
+    resp.className = 'ask-response visible'
+    resp.textContent = text
+  } catch(e) {
+    resp.className = 'ask-response visible'
+    resp.textContent = 'Error: ' + e.message
+  } finally {
+    btn.disabled = false
+  }
+}
+</script>
+</body>
+</html>
