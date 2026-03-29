@@ -71,7 +71,7 @@ class ProxyController
                     ? array_merge([['role' => 'system', 'content' => $system]], $messages)
                     : $messages,
                 'stream'     => true,
-                'max_tokens' => 480,
+                'max_tokens' => $body['max_tokens'] ?? 480,
             ]);
             $headers = [
                 'Content-Type: application/json',
@@ -100,8 +100,8 @@ class ProxyController
 
         } else { // anthropic
             $body_json = json_encode([
-                'model'      => $cfg['model'],
-                'max_tokens' => 480,
+    'model'      => $cfg['model'],
+    'max_tokens' => $body['max_tokens'] ?? 480,
                 'stream'     => true,
                 'system'     => $system,
                 'messages'   => $messages,
