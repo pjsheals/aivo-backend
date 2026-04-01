@@ -14,17 +14,23 @@ class OptimizeController
     {
         $body = request_body();
 
-        $email   = isset($body['email'])   ? strtolower(trim($body['email'])) : null;
-        $name    = $body['name']            ?? '';
-        $company = $body['company']         ?? '';
-        $plan    = $body['plan']            ?? 'free';
-        $beta    = (bool)($body['beta_access']    ?? false);
-        $brand   = $body['probe_brand']     ?? '';
-        $cat     = $body['probe_category']  ?? '';
+        $email    = isset($body['email'])   ? strtolower(trim($body['email'])) : null;
+        $name     = $body['name']            ?? '';
+        $company  = $body['company']         ?? '';
+        $plan     = $body['plan']            ?? 'free';
+        $beta     = (bool)($body['beta_access']    ?? false);
+        $brand    = $body['probe_brand']     ?? '';
+        $cat      = $body['probe_category']  ?? '';
+        $password = trim($body['password']   ?? '');
 
         if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             abort(422, 'Valid email required');
         }
+
+        // Hash password with bcrypt — never stored plain-text
+        $passwordHash = $password
+            ? password_hash($password, PASSWORD_BCRYPT, ['cost' => 12])
+            : null;
 
         try {
             $user = User::where('email', $email)->first();
@@ -36,6 +42,10 @@ class OptimizeController
                 $user->beta_access    = $beta;
                 $user->probe_brand    = $brand   ?: $user->probe_brand;
                 $user->probe_category = $cat     ?: $user->probe_category;
+                // Only update password if a new one was provided
+                if ($passwordHash) {
+                    $user->password_hash = $passwordHash;
+                }
                 $user->save();
             } else {
                 $user = User::create([
@@ -47,14 +57,132 @@ class OptimizeController
                     'probe_brand'    => $brand,
                     'probe_category' => $cat,
                     'tests_used'     => 0,
+                    'password_hash'  => $passwordHash,
                 ]);
             }
 
-            json_response(['status' => 'ok']);
+            // Create session and return token so frontend can store it
+            $token = $this->createSession($user);
+
+            json_response([
+                'status' => 'ok',
+                'token'  => $token,
+                'user'   => $this->safeUser($user),
+            ]);
 
         } catch (\Throwable $e) {
             log_error('[AIVO] register error', ['error' => $e->getMessage()]);
             json_response(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+
+    // ── POST /api/login ──────────────────────────────────────────
+    public function login(): void
+    {
+        $body     = request_body();
+        $email    = isset($body['email'])    ? strtolower(trim($body['email']))  : null;
+        $password = isset($body['password']) ? trim($body['password'])           : '';
+
+        if (!$email || !$password) {
+            http_response_code(400);
+            json_response(['error' => 'Email and password are required.']);
+            return;
+        }
+
+        try {
+            $user = User::where('email', $email)->first();
+
+            // Return same error whether email not found or password wrong
+            // — prevents email enumeration attacks
+            if (!$user || empty($user->password_hash) ||
+                !password_verify($password, $user->password_hash)) {
+                http_response_code(401);
+                json_response(['error' => 'Incorrect email or password.']);
+                return;
+            }
+
+            // Update last login
+            $user->last_login_at = now();
+            $user->save();
+
+            $token = $this->createSession($user);
+
+            // Fetch latest diagnostic for session restoration
+            $latest = DiagnosticRun::where('user_id', $user->id)
+                ->orderByDesc('created_at')
+                ->first();
+
+            $diagPayload = null;
+            if ($latest) {
+                $diagPayload = [
+                    'brand'       => $latest->brand,
+                    'category'    => $latest->category,
+                    'results'     => $latest->results,
+                    'completedAt' => (string)$latest->created_at,
+                ];
+            }
+
+            json_response([
+                'success'           => true,
+                'token'             => $token,
+                'user'              => $this->safeUser($user),
+                'latestDiagnostic'  => $diagPayload,
+            ]);
+
+        } catch (\Throwable $e) {
+            log_error('[AIVO] login error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error. Please try again.']);
+        }
+    }
+
+
+    // ── POST /api/change-password ────────────────────────────────
+    public function changePassword(): void
+    {
+        // Validate Bearer token from Authorization header
+        $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+        $token      = str_replace('Bearer ', '', $authHeader);
+        $user       = $this->getUserByToken($token);
+
+        if (!$user) {
+            http_response_code(401);
+            json_response(['error' => 'Session expired. Please sign in again.']);
+            return;
+        }
+
+        $body            = request_body();
+        $currentPassword = trim($body['current_password'] ?? '');
+        $newPassword     = trim($body['new_password']     ?? '');
+
+        if (strlen($newPassword) < 8) {
+            http_response_code(400);
+            json_response(['error' => 'New password must be at least 8 characters.']);
+            return;
+        }
+
+        // Verify current password against bcrypt hash
+        if (!empty($user->password_hash) &&
+            !password_verify($currentPassword, $user->password_hash)) {
+            http_response_code(401);
+            json_response(['error' => 'Current password is incorrect.']);
+            return;
+        }
+
+        try {
+            $user->password_hash = password_hash($newPassword, PASSWORD_BCRYPT, ['cost' => 12]);
+            $user->save();
+
+            // Issue a fresh session token after password change
+            $newToken = $this->createSession($user);
+
+            json_response(['success' => true, 'token' => $newToken]);
+
+        } catch (\Throwable $e) {
+            log_error('[AIVO] change-password error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error. Please try again.']);
         }
     }
 
@@ -385,6 +513,59 @@ class OptimizeController
 
     // ── Private helpers ──────────────────────────────────────────
 
+    /**
+     * Generate a cryptographically secure 64-character session token,
+     * store it on the user with a 30-day expiry, and return the token.
+     */
+    private function createSession(User $user): string
+    {
+        $token   = bin2hex(random_bytes(32)); // 64 hex chars
+        $expires = date('Y-m-d H:i:s', strtotime('+30 days'));
+
+        $user->session_token   = $token;
+        $user->session_expires = $expires;
+        $user->save();
+
+        return $token;
+    }
+
+    /**
+     * Look up a user by their session token.
+     * Returns null if token is missing, unknown, or expired.
+     */
+    private function getUserByToken(string $token): ?User
+    {
+        if (!$token) return null;
+
+        return User::where('session_token', $token)
+            ->where('session_expires', '>', now())
+            ->first();
+    }
+
+    /**
+     * Return a safe subset of user fields for the frontend.
+     * Never exposes password_hash, session_token, or session_expires.
+     */
+    private function safeUser(User $user): array
+    {
+        $masterEmails = ['paul@aivoedge.net', 'tim@aivoedge.net', 'paul@aivoevidentia.com'];
+
+        return [
+            'name'          => $user->name          ?? '',
+            'email'         => $user->email         ?? '',
+            'company'       => $user->company       ?? '',
+            'plan'          => $user->plan          ?? 'free',
+            'betaAccess'    => (bool)($user->beta_access ?? false),
+            'superadmin'    => in_array(strtolower($user->email ?? ''), $masterEmails),
+            'testsUsed'     => (int)($user->tests_used  ?? 0),
+            'testsMonth'    => $user->tests_month   ?? '',
+            'registeredAt'  => (string)($user->created_at  ?? ''),
+            'lastLoginAt'   => (string)($user->last_login_at ?? ''),
+            'probeBrand'    => $user->probe_brand    ?? '',
+            'probeCategory' => $user->probe_category ?? '',
+        ];
+    }
+
     private function stripeRequest(string $method, string $path, array $params): array
     {
         $key = env('STRIPE_SECRET_KEY');
@@ -466,7 +647,7 @@ class OptimizeController
           <p style="margin:0;font-size:13px;color:#6b7280">This link expires in 1 hour. If you didn't request this, you can safely ignore this email.</p>
         </td></tr>
         <tr><td style="padding:20px 40px;border-top:1px solid #f3f4f6">
-          <p style="margin:0;font-size:12px;color:#9ca3af">AIVO Edge &nbsp;·&nbsp; <a href="https://aivoedge.net" style="color:#10b981;text-decoration:none">aivoedge.net</a></p>
+          <p style="margin:0;font-size:12px;color:#9ca3af">AIVO Optimize &nbsp;·&nbsp; <a href="https://app.aivooptimize.com" style="color:#10b981;text-decoration:none">app.aivooptimize.com</a></p>
         </td></tr>
       </table>
     </td></tr>
