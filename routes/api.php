@@ -1,7 +1,5 @@
 <?php
-
 declare(strict_types=1);
-
 use Aivo\Controllers\CheckoutController;
 use Aivo\Controllers\WebhookController;
 use Aivo\Controllers\HealthController;
@@ -9,11 +7,9 @@ use Aivo\Controllers\OptimizeController;
 use Aivo\Controllers\ProxyController;
 use Aivo\Controllers\EmailController;
 use Aivo\Controllers\ProbeDataController;
-
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri    = rtrim($uri, '/') ?: '/';
-
 // ── Route table ───────────────────────────────────────────────────
 $routes = [
     'GET'  => [
@@ -31,6 +27,8 @@ $routes = [
         '/api/webhook'                 => [WebhookController::class, 'handle'],
         // User management
         '/api/register'                => [OptimizeController::class, 'register'],
+        '/api/login'                   => [OptimizeController::class, 'login'],
+        '/api/change-password'         => [OptimizeController::class, 'changePassword'],
         '/api/sync-diagnostic'         => [OptimizeController::class, 'syncDiagnostic'],
         '/api/forgot-password'         => [OptimizeController::class, 'forgotPassword'],
         '/api/cancel-subscription'     => [OptimizeController::class, 'cancelSubscription'],
@@ -43,13 +41,10 @@ $routes = [
         '/api/probe-data/stats'        => [ProbeDataController::class, 'stats'],
     ],
 ];
-
 // ── Dispatch ──────────────────────────────────────────────────────
 $handler = $routes[$method][$uri] ?? null;
-
 if ($handler === null) {
     abort(404, 'Route not found: ' . $method . ' ' . $uri);
 }
-
 [$class, $action] = $handler;
 (new $class)->$action();
