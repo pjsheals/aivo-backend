@@ -323,7 +323,60 @@ class OptimizeController
         }
     }
 
+// ── POST /api/reset-password ─────────────────────────────────
+    public function resetPassword(): void
+    {
+        $body        = request_body();
+        $token       = trim($body['token']        ?? '');
+        $newPassword = trim($body['new_password'] ?? '');
 
+        if (!$token) {
+            http_response_code(400);
+            json_response(['error' => 'Reset token is required.']);
+            return;
+        }
+
+        if (strlen($newPassword) < 8) {
+            http_response_code(400);
+            json_response(['error' => 'Password must be at least 8 characters.']);
+            return;
+        }
+
+        try {
+            $user = User::where('reset_token', $token)->first();
+
+            if (!$user) {
+                http_response_code(400);
+                json_response(['error' => 'Invalid or expired reset link. Please request a new one.']);
+                return;
+            }
+
+            if (!$user->reset_token_expiry || strtotime($user->reset_token_expiry) < time()) {
+                http_response_code(400);
+                json_response(['error' => 'This reset link has expired. Please request a new one.']);
+                return;
+            }
+
+            $user->password_hash      = password_hash($newPassword, PASSWORD_BCRYPT, ['cost' => 12]);
+            $user->reset_token        = null;
+            $user->reset_token_expiry = null;
+            $user->save();
+
+            $sessionToken = $this->createSession($user);
+
+            json_response([
+                'success' => true,
+                'token'   => $sessionToken,
+                'email'   => $user->email,
+            ]);
+
+        } catch (\Throwable $e) {
+            log_error('[AIVO] reset-password error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error. Please try again.']);
+        }
+    }
+    
     // ── POST /api/cancel-subscription ───────────────────────────
     public function cancelSubscription(): void
     {
