@@ -7,6 +7,7 @@ use Aivo\Controllers\OptimizeController;
 use Aivo\Controllers\ProxyController;
 use Aivo\Controllers\EmailController;
 use Aivo\Controllers\ProbeDataController;
+use Aivo\Controllers\AdminController;
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri    = rtrim($uri, '/') ?: '/';
@@ -19,6 +20,8 @@ $routes = [
         '/api/user-data'     => [OptimizeController::class, 'getUserData'],
         '/api/probe-stats'   => [OptimizeController::class, 'probeStats'],
         '/api/probe-data/stats' => [ProbeDataController::class, 'stats'],
+        '/api/admin/users'      => [AdminController::class, 'getUsers'],
+        '/api/admin/stats'      => [AdminController::class, 'getStats'],
     ],
     'POST' => [
         // Stripe
