@@ -147,4 +147,57 @@ class AdminController
             'categories'   => $cats,
         ]);
     }
+    // ── POST /api/admin/set-plan ─────────────────────────────────
+    public function setPlan(): void
+    {
+        $this->requireSuperadmin();
+
+        $body       = request_body();
+        $email      = isset($body['email']) ? strtolower(trim($body['email'])) : null;
+        $plan       = $body['plan']        ?? 'free';
+        $betaAccess = (bool)($body['beta_access'] ?? false);
+
+        if (!$email) { abort(422, 'Email required'); }
+
+        $pdo  = db();
+        $stmt = $pdo->prepare('UPDATE users SET plan = ?, beta_access = ? WHERE email = ?');
+        $stmt->execute([$plan, $betaAccess ? 1 : 0, $email]);
+
+        if ($stmt->rowCount() === 0) {
+            abort(404, 'User not found');
+        }
+
+        json_response(['success' => true]);
+    }
+
+    // ── POST /api/admin/delete-user ──────────────────────────────
+    public function deleteUser(): void
+    {
+        $this->requireSuperadmin();
+
+        $body  = request_body();
+        $email = isset($body['email']) ? strtolower(trim($body['email'])) : null;
+
+        if (!$email) { abort(422, 'Email required'); }
+
+        // Prevent superadmins from deleting themselves
+        $superadmins = ['paul@aivoedge.net', 'tim@aivoedge.net', 'paul@aivoevidentia.com'];
+        if (in_array($email, $superadmins, true)) {
+            abort(403, 'Cannot delete a superadmin account');
+        }
+
+        $pdo = db();
+
+        // Delete diagnostic runs first (foreign key)
+        $user = $pdo->prepare('SELECT id FROM users WHERE email = ?');
+        $user->execute([$email]);
+        $row = $user->fetch(\PDO::FETCH_ASSOC);
+
+        if (!$row) { abort(404, 'User not found'); }
+
+        $pdo->prepare('DELETE FROM diagnostic_runs WHERE user_id = ?')->execute([$row['id']]);
+        $pdo->prepare('DELETE FROM users WHERE id = ?')->execute([$row['id']]);
+
+        json_response(['success' => true]);
+    }
 }
