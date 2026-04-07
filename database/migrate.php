@@ -75,6 +75,26 @@ if ($schema->hasTable('users')) {
             $table->timestamp('reset_token_expiry')->nullable();
         });
     }
+    // ── Add auth columns to users (safe — checks first) ─────────────
+if ($schema->hasTable('users')) {
+    if (!$schema->hasColumn('users', 'password_hash')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->string('password_hash')->nullable();
+        });
+    }
+    if (!$schema->hasColumn('users', 'session_token')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->string('session_token', 64)->nullable()->unique();
+            $table->timestamp('session_expires')->nullable();
+        });
+    }
+    if (!$schema->hasColumn('users', 'last_login_at')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->timestamp('last_login_at')->nullable();
+        });
+    }
+}
+    
 }// ── probe_events ─────────────────────────────────────────────────
 if (!$schema->hasTable('probe_events')) {
     $schema->create('probe_events', function (Blueprint $table) {
