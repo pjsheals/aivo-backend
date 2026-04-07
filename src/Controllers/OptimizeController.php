@@ -304,10 +304,10 @@ class OptimizeController
                 $user->save();
 
                 $firstName   = explode(' ', trim($user->name ?: $email))[0];
-                $frontendUrl = env('FRONTEND_URL', 'https://aivoedge.net');
+                $frontendUrl = env('FRONTEND_URL', 'https://app.aivooptimize.com');
                 $resetUrl    = $frontendUrl . '?reset=' . $token;
 
-                $this->sendPostmarkEmail(
+                $this->sendResendEmail(
                     to:      $email,
                     subject: 'Reset your AIVO Optimize password',
                     html:    $this->resetEmailHtml($firstName, $resetUrl),
@@ -323,7 +323,8 @@ class OptimizeController
         }
     }
 
-// ── POST /api/reset-password ─────────────────────────────────
+
+    // ── POST /api/reset-password ─────────────────────────────────
     public function resetPassword(): void
     {
         $body        = request_body();
@@ -376,7 +377,8 @@ class OptimizeController
             json_response(['error' => 'Server error. Please try again.']);
         }
     }
-    
+
+
     // ── POST /api/cancel-subscription ───────────────────────────
     public function cancelSubscription(): void
     {
@@ -566,13 +568,9 @@ class OptimizeController
 
     // ── Private helpers ──────────────────────────────────────────
 
-    /**
-     * Generate a cryptographically secure 64-character session token,
-     * store it on the user with a 30-day expiry, and return the token.
-     */
     private function createSession(User $user): string
     {
-        $token   = bin2hex(random_bytes(32)); // 64 hex chars
+        $token   = bin2hex(random_bytes(32));
         $expires = date('Y-m-d H:i:s', strtotime('+30 days'));
 
         $user->session_token   = $token;
@@ -582,10 +580,6 @@ class OptimizeController
         return $token;
     }
 
-    /**
-     * Look up a user by their session token.
-     * Returns null if token is missing, unknown, or expired.
-     */
     private function getUserByToken(string $token): ?User
     {
         if (!$token) return null;
@@ -595,10 +589,6 @@ class OptimizeController
             ->first();
     }
 
-    /**
-     * Return a safe subset of user fields for the frontend.
-     * Never exposes password_hash, session_token, or session_expires.
-     */
     private function safeUser(User $user): array
     {
         $masterEmails = ['paul@aivoedge.net', 'tim@aivoedge.net', 'paul@aivoevidentia.com'];
@@ -644,35 +634,47 @@ class OptimizeController
         return json_decode($response ?: '{}', true) ?? [];
     }
 
-    private function sendPostmarkEmail(string $to, string $subject, string $html, string $text): void
+    // ── Send email via Resend ────────────────────────────────────
+    private function sendResendEmail(string $to, string $subject, string $html, string $text): void
     {
-        $token = env('POSTMARK_TOKEN');
-        $from  = env('POSTMARK_FROM', 'edge@aivoedge.net');
+        $apiKey = env('RESEND_API_KEY');
+        $from   = env('POSTMARK_FROM', 'edge@aivoedge.net'); // reuses existing variable
 
-        if (!$token) return;
+        if (!$apiKey) {
+            log_error('[AIVO] sendResendEmail: RESEND_API_KEY not set');
+            return;
+        }
 
         $payload = json_encode([
-            'From'          => $from,
-            'To'            => $to,
-            'Subject'       => $subject,
-            'HtmlBody'      => $html,
-            'TextBody'      => $text,
-            'MessageStream' => 'outbound',
+            'from'    => 'AIVO Optimize <' . $from . '>',
+            'to'      => [$to],
+            'subject' => $subject,
+            'html'    => $html,
+            'text'    => $text,
         ]);
 
-        $ch = curl_init('https://api.postmarkapp.com/email');
+        $ch = curl_init('https://api.resend.com/emails');
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $payload,
             CURLOPT_HTTPHEADER     => [
-                'Accept: application/json',
+                'Authorization: Bearer ' . $apiKey,
                 'Content-Type: application/json',
-                'X-Postmark-Server-Token: ' . $token,
             ],
         ]);
-        curl_exec($ch);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+
+        if ($httpCode >= 400) {
+            log_error('[AIVO] Resend email failed', [
+                'to'       => $to,
+                'status'   => $httpCode,
+                'response' => $response,
+            ]);
+        }
     }
 
     private function resetEmailHtml(string $firstName, string $resetUrl): string
@@ -685,22 +687,22 @@ class OptimizeController
   <table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px">
     <tr><td align="center">
       <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;border:1px solid #e5e7eb">
-        <tr><td style="background:#0F1E35;padding:28px 40px;border-radius:8px 8px 0 0">
-          <span style="font-size:18px;font-weight:700;color:#10b981">AIVO</span>
+        <tr><td style="background:#000000;padding:28px 40px;border-radius:8px 8px 0 0">
+          <span style="font-size:18px;font-weight:700;color:#FC8337">AIVO</span>
           <span style="font-size:18px;font-weight:300;color:#ffffff"> Optimize</span>
         </td></tr>
         <tr><td style="padding:40px">
           <p style="margin:0 0 16px;font-size:15px;color:#374151;line-height:1.6">Hi {$firstName},</p>
           <p style="margin:0 0 24px;font-size:15px;color:#374151;line-height:1.6">You requested a password reset for your AIVO Optimize account. Click below to reset it.</p>
           <table cellpadding="0" cellspacing="0" style="margin:0 0 24px">
-            <tr><td style="background:#10b981;border-radius:6px">
-              <a href="{$resetUrl}" style="display:inline-block;padding:12px 28px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none">Reset password</a>
+            <tr><td style="background:#FC8337;border-radius:6px">
+              <a href="{$resetUrl}" style="display:inline-block;padding:12px 28px;font-size:14px;font-weight:600;color:#000000;text-decoration:none">Reset password</a>
             </td></tr>
           </table>
           <p style="margin:0;font-size:13px;color:#6b7280">This link expires in 1 hour. If you didn't request this, you can safely ignore this email.</p>
         </td></tr>
         <tr><td style="padding:20px 40px;border-top:1px solid #f3f4f6">
-          <p style="margin:0;font-size:12px;color:#9ca3af">AIVO Optimize &nbsp;·&nbsp; <a href="https://app.aivooptimize.com" style="color:#10b981;text-decoration:none">app.aivooptimize.com</a></p>
+          <p style="margin:0;font-size:12px;color:#9ca3af">AIVO Optimize &nbsp;·&nbsp; <a href="https://app.aivooptimize.com" style="color:#FC8337;text-decoration:none">app.aivooptimize.com</a></p>
         </td></tr>
       </table>
     </td></tr>
