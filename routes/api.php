@@ -42,7 +42,9 @@ $routes = [
         '/api/proxy'                   => [ProxyController::class, 'handle'],
         '/api/send-email'              => [EmailController::class, 'handle'],
         '/api/probe-data'              => [ProbeDataController::class, 'store'],
-        '/api/probe-data/stats'        => [ProbeDataController::class, 'stats'],
+        '/api/probe-data/stats'  => [ProbeDataController::class, 'stats'],
+        '/api/admin/set-plan'    => [AdminController::class, 'setPlan'],
+        '/api/admin/delete-user' => [AdminController::class, 'deleteUser'],
     ],
 ];
 // ── Dispatch ──────────────────────────────────────────────────────
