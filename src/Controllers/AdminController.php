@@ -55,8 +55,8 @@ class AdminController
         $this->requireSuperadmin();
 
         $rows = \Illuminate\Database\Capsule\Manager::table('users')
-            ->select('id','name','email','company','plan','beta_access','tests_used','probe_brand','probe_category','registered_at','last_login_at')
-            ->orderBy('registered_at', 'desc')
+            ->select('id','name','email','company','plan','beta_access','tests_used','probe_brand','probe_category','created_at','last_login_at')
+            ->orderBy('created_at', 'desc')
             ->get();
 
         $users = $rows->map(fn($u) => [
@@ -69,7 +69,7 @@ class AdminController
             'tests_used'     => (int)($u->tests_used  ?? 0),
             'probe_brand'    => $u->probe_brand    ?? '',
             'probe_category' => $u->probe_category ?? '',
-            'registered_at'  => $u->registered_at  ?? null,
+            'registered_at'  => $u->created_at  ?? null,
             'last_login_at'  => $u->last_login_at  ?? null,
         ])->toArray();
 
