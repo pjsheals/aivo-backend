@@ -305,7 +305,7 @@ class OptimizeController
 
                 $firstName   = explode(' ', trim($user->name ?: $email))[0];
                 $frontendUrl = env('FRONTEND_URL', 'https://app.aivooptimize.com');
-                $resetUrl    = $frontendUrl . '?reset=' . $token;
+                $resetUrl    = $frontendUrl . '/#reset=' . $token;
 
                 $this->sendResendEmail(
                     to:      $email,
