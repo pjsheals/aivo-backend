@@ -23,12 +23,20 @@ class User extends Model
         'tests_used',
         'tests_month',
         'upgraded_at',
+        'password_hash',
+        'session_token',
+        'session_expires',
+        'last_login_at',
+        'reset_token',
+        'reset_token_expiry',
     ];
 
     protected $casts = [
-        'beta_access'  => 'boolean',
-        'upgraded_at'  => 'datetime',
-        'tests_used'   => 'integer',
+        'beta_access'     => 'boolean',
+        'upgraded_at'     => 'datetime',
+        'last_login_at'   => 'datetime',
+        'session_expires' => 'datetime',
+        'tests_used'      => 'integer',
     ];
 
     public function subscriptions()
