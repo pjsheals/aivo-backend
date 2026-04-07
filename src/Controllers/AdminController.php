@@ -37,17 +37,12 @@ class AdminController
             abort(403, 'Forbidden');
         }
 
-        $pdo  = db();
-        $stmt = $pdo->prepare(
-            'SELECT email FROM users
-              WHERE session_token = ?
-                AND session_expires > NOW()
-              LIMIT 1'
-        );
-        $stmt->execute([$token]);
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        $user = \Illuminate\Database\Capsule\Manager::table('users')
+            ->where('session_token', $token)
+            ->where('session_expires', '>', now())
+            ->first();
 
-        if (!$row || !in_array(strtolower($row['email']), self::SUPERADMIN_EMAILS, true)) {
+        if (!$user || !in_array(strtolower($user->email ?? ''), self::SUPERADMIN_EMAILS, true)) {
             abort(403, 'Forbidden');
         }
     }
@@ -59,30 +54,24 @@ class AdminController
     {
         $this->requireSuperadmin();
 
-        $pdo  = db();
-        $stmt = $pdo->query(
-            'SELECT
-               id,
-               name,
-               email,
-               company,
-               plan,
-               beta_access,
-               tests_used,
-               probe_brand,
-               probe_category,
-               registered_at,
-               last_login_at
-             FROM users
-             ORDER BY registered_at DESC'
-        );
-        $users = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $rows = \Illuminate\Database\Capsule\Manager::table('users')
+            ->select('id','name','email','company','plan','beta_access','tests_used','probe_brand','probe_category','registered_at','last_login_at')
+            ->orderBy('registered_at', 'desc')
+            ->get();
 
-        foreach ($users as &$u) {
-            $u['beta_access'] = (bool) $u['beta_access'];
-            $u['tests_used']  = (int)  ($u['tests_used'] ?? 0);
-        }
-        unset($u);
+        $users = $rows->map(fn($u) => [
+            'id'             => $u->id,
+            'name'           => $u->name           ?? '',
+            'email'          => $u->email          ?? '',
+            'company'        => $u->company        ?? '',
+            'plan'           => $u->plan           ?? 'free',
+            'beta_access'    => (bool)($u->beta_access ?? false),
+            'tests_used'     => (int)($u->tests_used  ?? 0),
+            'probe_brand'    => $u->probe_brand    ?? '',
+            'probe_category' => $u->probe_category ?? '',
+            'registered_at'  => $u->registered_at  ?? null,
+            'last_login_at'  => $u->last_login_at  ?? null,
+        ])->toArray();
 
         json_response(['users' => $users]);
     }
@@ -93,57 +82,44 @@ class AdminController
     {
         $this->requireSuperadmin();
 
-        $pdo = db();
+        $db = \Illuminate\Database\Capsule\Manager::table('users');
 
-        // Core user aggregates
-        $totals = $pdo->query(
-            "SELECT
-               COUNT(*)                                                    AS total_users,
-               SUM(CASE WHEN plan = 'paid'    THEN 1 ELSE 0 END)          AS paid_users,
-               SUM(CASE WHEN plan = 'free'    THEN 1 ELSE 0 END)          AS free_users,
-               SUM(CASE WHEN beta_access = TRUE THEN 1 ELSE 0 END)        AS beta_users,
-               COALESCE(SUM(tests_used), 0)                               AS total_tests,
-               SUM(CASE WHEN last_login_at >= NOW() - INTERVAL '1 day'
-                        THEN 1 ELSE 0 END)                                AS active_today
-             FROM users"
-        )->fetch(\PDO::FETCH_ASSOC);
+        $total_users  = (clone $db)->count();
+        $paid_users   = (clone $db)->where('plan', 'paid')->count();
+        $free_users   = (clone $db)->where('plan', 'free')->count();
+        $beta_users   = (clone $db)->where('beta_access', true)->count();
+        $total_tests  = (int)((clone $db)->sum('tests_used') ?? 0);
+        $active_today = (clone $db)->where('last_login_at', '>=', now()->subDay())->count();
 
-        // Tests run today — probe_results table may not exist yet, so wrap safely
         $tests_today = 0;
         try {
-            $tests_today = (int) $pdo->query(
-                "SELECT COUNT(*) FROM probe_results
-                  WHERE created_at >= NOW() - INTERVAL '1 day'"
-            )->fetchColumn();
+            $tests_today = \Illuminate\Database\Capsule\Manager::table('probe_events')
+                ->where('created_at', '>=', now()->subDay())
+                ->count();
         } catch (\Throwable $e) {
-            // Table doesn't exist yet — fall back to tests_used sum
-            $tests_today = (int) $pdo->query(
-                "SELECT COALESCE(SUM(tests_used), 0) FROM users
-                  WHERE last_login_at >= NOW() - INTERVAL '1 day'"
-            )->fetchColumn();
+            $tests_today = $active_today;
         }
 
-        // Category breakdown from probe_brand/probe_category columns
-        $cats = $pdo->query(
-            "SELECT
-               probe_category  AS category,
-               COUNT(*)        AS cnt
-             FROM users
-             WHERE probe_category IS NOT NULL
-               AND probe_category <> ''
-             GROUP BY probe_category
-             ORDER BY cnt DESC
-             LIMIT 8"
-        )->fetchAll(\PDO::FETCH_ASSOC);
+        $cats = (clone $db)
+            ->select('probe_category as category')
+            ->selectRaw('COUNT(*) as cnt')
+            ->whereNotNull('probe_category')
+            ->where('probe_category', '<>', '')
+            ->groupBy('probe_category')
+            ->orderByRaw('COUNT(*) DESC')
+            ->limit(8)
+            ->get()
+            ->map(fn($r) => ['category' => $r->category, 'cnt' => $r->cnt])
+            ->toArray();
 
         json_response([
-            'total_users'  => (int) $totals['total_users'],
-            'paid_users'   => (int) $totals['paid_users'],
-            'free_users'   => (int) $totals['free_users'],
-            'beta_users'   => (int) $totals['beta_users'],
-            'total_tests'  => (int) $totals['total_tests'],
+            'total_users'  => $total_users,
+            'paid_users'   => $paid_users,
+            'free_users'   => $free_users,
+            'beta_users'   => $beta_users,
+            'total_tests'  => $total_tests,
             'tests_today'  => $tests_today,
-            'active_today' => (int) $totals['active_today'],
+            'active_today' => $active_today,
             'categories'   => $cats,
         ]);
     }
@@ -159,11 +135,11 @@ class AdminController
 
         if (!$email) { abort(422, 'Email required'); }
 
-        $pdo  = db();
-        $stmt = $pdo->prepare('UPDATE users SET plan = ?, beta_access = ? WHERE email = ?');
-        $stmt->execute([$plan, $betaAccess ? 1 : 0, $email]);
+        $updated = \Illuminate\Database\Capsule\Manager::table('users')
+            ->where('email', $email)
+            ->update(['plan' => $plan, 'beta_access' => $betaAccess ? 1 : 0]);
 
-        if ($stmt->rowCount() === 0) {
+        if ($updated === 0) {
             abort(404, 'User not found');
         }
 
@@ -186,17 +162,16 @@ class AdminController
             abort(403, 'Cannot delete a superadmin account');
         }
 
-        $pdo = db();
-
-        // Delete diagnostic runs first (foreign key)
-        $user = $pdo->prepare('SELECT id FROM users WHERE email = ?');
-        $user->execute([$email]);
-        $row = $user->fetch(\PDO::FETCH_ASSOC);
+        $row = \Illuminate\Database\Capsule\Manager::table('users')
+            ->where('email', $email)
+            ->first();
 
         if (!$row) { abort(404, 'User not found'); }
 
-        $pdo->prepare('DELETE FROM diagnostic_runs WHERE user_id = ?')->execute([$row['id']]);
-        $pdo->prepare('DELETE FROM users WHERE id = ?')->execute([$row['id']]);
+        \Illuminate\Database\Capsule\Manager::table('diagnostic_runs')
+            ->where('user_id', $row->id)->delete();
+        \Illuminate\Database\Capsule\Manager::table('users')
+            ->where('id', $row->id)->delete();
 
         json_response(['success' => true]);
     }
