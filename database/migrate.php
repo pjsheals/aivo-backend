@@ -67,35 +67,8 @@ if (!$schema->hasTable('stripe_events')) {
         $table->timestamps();
     });
 }
-// ── Add reset token columns to users (safe — checks first) ──────
-if ($schema->hasTable('users')) {
-    if (!$schema->hasColumn('users', 'reset_token')) {
-        $schema->table('users', function (Blueprint $table) {
-            $table->string('reset_token', 64)->nullable();
-            $table->timestamp('reset_token_expiry')->nullable();
-        });
-    }
-    // ── Add auth columns to users (safe — checks first) ─────────────
-if ($schema->hasTable('users')) {
-    if (!$schema->hasColumn('users', 'password_hash')) {
-        $schema->table('users', function (Blueprint $table) {
-            $table->string('password_hash')->nullable();
-        });
-    }
-    if (!$schema->hasColumn('users', 'session_token')) {
-        $schema->table('users', function (Blueprint $table) {
-            $table->string('session_token', 64)->nullable()->unique();
-            $table->timestamp('session_expires')->nullable();
-        });
-    }
-    if (!$schema->hasColumn('users', 'last_login_at')) {
-        $schema->table('users', function (Blueprint $table) {
-            $table->timestamp('last_login_at')->nullable();
-        });
-    }
-}
-    
-}// ── probe_events ─────────────────────────────────────────────────
+
+// ── probe_events ─────────────────────────────────────────────────
 if (!$schema->hasTable('probe_events')) {
     $schema->create('probe_events', function (Blueprint $table) {
         $table->id();
@@ -107,51 +80,6 @@ if (!$schema->hasTable('probe_events')) {
         $table->integer('dsov')->nullable();
         $table->string('source')->default('beta');
         $table->timestamps();
-    });
-}
-// ── agent_probes ─────────────────────────────────────────────────
-if (!$schema->hasTable('agent_probes')) {
-    $schema->create('agent_probes', function (Blueprint $table) {
-        $table->id();
-        $table->string('brand');
-        $table->string('category');
-        $table->string('vertical')->nullable();
-        $table->integer('dsov_score');
-        $table->string('band');
-        $table->integer('oai_score')->nullable();
-        $table->integer('pplx_score')->nullable();
-        $table->boolean('t1_validated')->default(false);
-        $table->boolean('t1_present_oai')->default(false);
-        $table->boolean('t1_present_pplx')->default(false);
-        $table->boolean('t2_survives')->default(false);
-        $table->boolean('t3_survives')->default(false);
-        $table->boolean('t4_wins')->default(false);
-        $table->boolean('oai_wins_t4')->default(false);
-        $table->boolean('pplx_wins_t4')->default(false);
-        $table->string('displacement_turn')->nullable();
-        $table->json('t2_competitors')->nullable();
-        $table->string('t4_winner')->nullable();
-        $table->bigInteger('rar_annual')->nullable();
-        $table->bigInteger('rar_monthly')->nullable();
-        $table->bigInteger('revenue_used')->nullable();
-        $table->string('contact_email')->nullable();
-        $table->string('contact_seniority')->nullable();
-        $table->string('contact_state')->nullable();
-        $table->string('contact_company')->nullable();
-        $table->boolean('email_sent')->default(false);
-        $table->timestamp('email_sent_at')->nullable();
-        $table->string('email_type')->nullable();
-        $table->string('source')->default('agent_paul');
-        $table->boolean('is_repeat')->default(false);
-        $table->unsignedBigInteger('previous_probe_id')->nullable();
-        $table->string('probe_version')->default('v1');
-        $table->timestamps();
-        $table->index('brand');
-        $table->index('category');
-        $table->index('band');
-        $table->index('displacement_turn');
-        $table->index('source');
-        $table->index('created_at');
     });
 }
 
@@ -199,4 +127,37 @@ if (!$schema->hasTable('agent_probes')) {
         $table->index('source');
         $table->index('created_at');
     });
+}
+
+// ── Add columns to users table (safe — each checks before adding) ─
+// These were missing from the original schema and are added here
+// so existing deployments get them without losing any data.
+if ($schema->hasTable('users')) {
+
+    if (!$schema->hasColumn('users', 'reset_token')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->string('reset_token', 64)->nullable();
+            $table->timestamp('reset_token_expiry')->nullable();
+        });
+    }
+
+    if (!$schema->hasColumn('users', 'password_hash')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->string('password_hash')->nullable();
+        });
+    }
+
+    if (!$schema->hasColumn('users', 'session_token')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->string('session_token', 64)->nullable()->unique();
+            $table->timestamp('session_expires')->nullable();
+        });
+    }
+
+    if (!$schema->hasColumn('users', 'last_login_at')) {
+        $schema->table('users', function (Blueprint $table) {
+            $table->timestamp('last_login_at')->nullable();
+        });
+    }
+
 }
