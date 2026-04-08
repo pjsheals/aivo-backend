@@ -8,43 +8,52 @@ use Aivo\Controllers\ProxyController;
 use Aivo\Controllers\EmailController;
 use Aivo\Controllers\ProbeDataController;
 use Aivo\Controllers\AdminController;
+use Aivo\Controllers\SupportController;
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri    = rtrim($uri, '/') ?: '/';
 // ── Route table ───────────────────────────────────────────────────
 $routes = [
     'GET'  => [
-        '/'                  => [HealthController::class, 'index'],
-        '/api/health'        => [HealthController::class, 'index'],
-        '/probe-intelligence'  => [HealthController::class, 'dashboard'],
-        '/api/user-data'     => [OptimizeController::class, 'getUserData'],
-        '/api/probe-stats'   => [OptimizeController::class, 'probeStats'],
-        '/api/probe-data/stats' => [ProbeDataController::class, 'stats'],
-        '/api/admin/users'      => [AdminController::class, 'getUsers'],
-        '/api/admin/stats'      => [AdminController::class, 'getStats'],
+        '/'                       => [HealthController::class,    'index'],
+        '/api/health'             => [HealthController::class,    'index'],
+        '/probe-intelligence'     => [HealthController::class,    'dashboard'],
+        '/api/user-data'          => [OptimizeController::class,  'getUserData'],
+        '/api/probe-stats'        => [OptimizeController::class,  'probeStats'],
+        '/api/probe-data/stats'   => [ProbeDataController::class, 'stats'],
+        '/api/admin/users'        => [AdminController::class,     'getUsers'],
+        '/api/admin/stats'        => [AdminController::class,     'getStats'],
+        // Support
+        '/api/support/tickets'    => [SupportController::class,   'myTickets'],
+        '/api/admin/tickets'      => [SupportController::class,   'adminTickets'],
     ],
     'POST' => [
         // Stripe
-        '/api/create-checkout-session' => [CheckoutController::class, 'createSession'],
-        '/api/verify-session'          => [CheckoutController::class, 'verifySession'],
-        '/api/webhook'                 => [WebhookController::class, 'handle'],
+        '/api/create-checkout-session' => [CheckoutController::class,   'createSession'],
+        '/api/verify-session'          => [CheckoutController::class,   'verifySession'],
+        '/api/webhook'                 => [WebhookController::class,    'handle'],
         // User management
-        '/api/register'                => [OptimizeController::class, 'register'],
-        '/api/login'                   => [OptimizeController::class, 'login'],
-        '/api/change-password'         => [OptimizeController::class, 'changePassword'],
-        '/api/sync-diagnostic'         => [OptimizeController::class, 'syncDiagnostic'],
-        '/api/forgot-password'          => [OptimizeController::class, 'forgotPassword'],
-        '/api/reset-password'           => [OptimizeController::class, 'resetPassword'],
-        '/api/cancel-subscription'     => [OptimizeController::class, 'cancelSubscription'],
-        '/api/delete-account'          => [OptimizeController::class, 'deleteAccount'],
-        '/api/probe-event'             => [OptimizeController::class, 'probeEvent'],
+        '/api/register'                => [OptimizeController::class,   'register'],
+        '/api/login'                   => [OptimizeController::class,   'login'],
+        '/api/change-password'         => [OptimizeController::class,   'changePassword'],
+        '/api/sync-diagnostic'         => [OptimizeController::class,   'syncDiagnostic'],
+        '/api/forgot-password'         => [OptimizeController::class,   'forgotPassword'],
+        '/api/reset-password'          => [OptimizeController::class,   'resetPassword'],
+        '/api/cancel-subscription'     => [OptimizeController::class,   'cancelSubscription'],
+        '/api/delete-account'          => [OptimizeController::class,   'deleteAccount'],
+        '/api/probe-event'             => [OptimizeController::class,   'probeEvent'],
         // AI proxy — keys never leave the server
-        '/api/proxy'                   => [ProxyController::class, 'handle'],
-        '/api/send-email'              => [EmailController::class, 'handle'],
-        '/api/probe-data'              => [ProbeDataController::class, 'store'],
-        '/api/probe-data/stats'  => [ProbeDataController::class, 'stats'],
-        '/api/admin/set-plan'    => [AdminController::class, 'setPlan'],
-        '/api/admin/delete-user' => [AdminController::class, 'deleteUser'],
+        '/api/proxy'                   => [ProxyController::class,      'handle'],
+        '/api/send-email'              => [EmailController::class,      'handle'],
+        '/api/probe-data'              => [ProbeDataController::class,  'store'],
+        '/api/probe-data/stats'        => [ProbeDataController::class,  'stats'],
+        '/api/admin/set-plan'          => [AdminController::class,      'setPlan'],
+        '/api/admin/delete-user'       => [AdminController::class,      'deleteUser'],
+        // Support tickets
+        '/api/support/ticket'          => [SupportController::class,    'createTicket'],
+        '/api/support/reply'           => [SupportController::class,    'userReply'],
+        '/api/admin/ticket/reply'      => [SupportController::class,    'adminReply'],
+        '/api/admin/ticket/status'     => [SupportController::class,    'adminStatus'],
     ],
 ];
 // ── Dispatch ──────────────────────────────────────────────────────
