@@ -8,7 +8,6 @@ use Aivo\Controllers\ProxyController;
 use Aivo\Controllers\EmailController;
 use Aivo\Controllers\ProbeDataController;
 use Aivo\Controllers\AdminController;
-use Aivo\Controllers\SupportController;
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri    = rtrim($uri, '/') ?: '/';
@@ -23,9 +22,6 @@ $routes = [
         '/api/probe-data/stats'   => [ProbeDataController::class, 'stats'],
         '/api/admin/users'        => [AdminController::class,     'getUsers'],
         '/api/admin/stats'        => [AdminController::class,     'getStats'],
-        // Support
-        '/api/support/tickets'    => [SupportController::class,   'myTickets'],
-        '/api/admin/tickets'      => [SupportController::class,   'adminTickets'],
     ],
     'POST' => [
         // Stripe
@@ -49,11 +45,6 @@ $routes = [
         '/api/probe-data/stats'        => [ProbeDataController::class,  'stats'],
         '/api/admin/set-plan'          => [AdminController::class,      'setPlan'],
         '/api/admin/delete-user'       => [AdminController::class,      'deleteUser'],
-        // Support tickets
-        '/api/support/ticket'          => [SupportController::class,    'createTicket'],
-        '/api/support/reply'           => [SupportController::class,    'userReply'],
-        '/api/admin/ticket/reply'      => [SupportController::class,    'adminReply'],
-        '/api/admin/ticket/status'     => [SupportController::class,    'adminStatus'],
     ],
 ];
 // ── Dispatch ──────────────────────────────────────────────────────
