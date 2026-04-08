@@ -4,13 +4,6 @@ declare(strict_types=1);
 
 namespace Aivo\Controllers;
 
-/**
- * Admin-only endpoints — protected by session token belonging to a superadmin email.
- *
- * Routes (add to routes/api.php):
- *   GET  /api/admin/users   → AdminController@getUsers
- *   GET  /api/admin/stats   → AdminController@getStats
- */
 class AdminController
 {
     private const SUPERADMIN_EMAILS = [
@@ -19,9 +12,6 @@ class AdminController
         'paul@aivoevidentia.com',
     ];
 
-    // ── Auth gate ────────────────────────────────────────────────
-    // Reads Bearer token from Authorization header, looks up the
-    // matching user row, and checks their email is in SUPERADMIN_EMAILS.
     private function requireSuperadmin(): void
     {
         $headers = getallheaders();
@@ -39,7 +29,7 @@ class AdminController
 
         $user = \Illuminate\Database\Capsule\Manager::table('users')
             ->where('session_token', $token)
-            ->where('session_expires', '>', now())
+            ->where('session_expires', '>', date('Y-m-d H:i:s'))
             ->first();
 
         if (!$user || !in_array(strtolower($user->email ?? ''), self::SUPERADMIN_EMAILS, true)) {
@@ -47,9 +37,6 @@ class AdminController
         }
     }
 
-    // ── GET /api/admin/users ─────────────────────────────────────
-    // Returns all user rows, newest first.
-    // Never returns password_hash, session_token, or reset_token.
     public function getUsers(): void
     {
         $this->requireSuperadmin();
@@ -69,32 +56,35 @@ class AdminController
             'tests_used'     => (int)($u->tests_used  ?? 0),
             'probe_brand'    => $u->probe_brand    ?? '',
             'probe_category' => $u->probe_category ?? '',
-            'registered_at'  => $u->created_at  ?? null,
+            'registered_at'  => $u->created_at     ?? null,
             'last_login_at'  => $u->last_login_at  ?? null,
         ])->toArray();
 
         json_response(['users' => $users]);
     }
 
-    // ── GET /api/admin/stats ─────────────────────────────────────
-    // Returns aggregate counts for the admin overview panel.
     public function getStats(): void
     {
         $this->requireSuperadmin();
 
+        // Use raw PHP date strings — no Carbon dependency
+        $yesterday = date('Y-m-d H:i:s', strtotime('-1 day'));
+        $todayStart = date('Y-m-d 00:00:00');
+
         $db = \Illuminate\Database\Capsule\Manager::table('users');
 
         $total_users  = (clone $db)->count();
-        $paid_users   = (clone $db)->where('plan', 'paid')->count();
-        $free_users   = (clone $db)->where('plan', 'free')->count();
+        $paid_users   = (clone $db)->whereIn('plan', ['growth', 'pro', 'agency', 'paid'])->count();
+        $free_users   = (clone $db)->where('plan', 'free')->where('beta_access', false)->count();
         $beta_users   = (clone $db)->where('beta_access', true)->count();
         $total_tests  = (int)((clone $db)->sum('tests_used') ?? 0);
-        $active_today = (clone $db)->where('last_login_at', '>=', now()->subDay())->count();
+        $active_today = (clone $db)->where('last_login_at', '>=', $yesterday)->count();
+        $new_today    = (clone $db)->where('created_at', '>=', $todayStart)->count();
 
         $tests_today = 0;
         try {
             $tests_today = \Illuminate\Database\Capsule\Manager::table('probe_events')
-                ->where('created_at', '>=', now()->subDay())
+                ->where('created_at', '>=', $yesterday)
                 ->count();
         } catch (\Throwable $e) {
             $tests_today = $active_today;
@@ -120,10 +110,11 @@ class AdminController
             'total_tests'  => $total_tests,
             'tests_today'  => $tests_today,
             'active_today' => $active_today,
+            'new_today'    => $new_today,
             'categories'   => $cats,
         ]);
     }
-    // ── POST /api/admin/set-plan ─────────────────────────────────
+
     public function setPlan(): void
     {
         $this->requireSuperadmin();
@@ -146,7 +137,6 @@ class AdminController
         json_response(['success' => true]);
     }
 
-    // ── POST /api/admin/delete-user ──────────────────────────────
     public function deleteUser(): void
     {
         $this->requireSuperadmin();
@@ -156,9 +146,7 @@ class AdminController
 
         if (!$email) { abort(422, 'Email required'); }
 
-        // Prevent superadmins from deleting themselves
-        $superadmins = ['paul@aivoedge.net', 'tim@aivoedge.net', 'paul@aivoevidentia.com'];
-        if (in_array($email, $superadmins, true)) {
+        if (in_array($email, self::SUPERADMIN_EMAILS, true)) {
             abort(403, 'Cannot delete a superadmin account');
         }
 
