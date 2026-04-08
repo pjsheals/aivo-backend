@@ -28,7 +28,7 @@ class SupportController
     ];
 
     private const NOTIFY_EMAIL = 'paul@aivoedge.net';
-    private const FROM_EMAIL   = 'support@aivoedge.net';
+    private const FROM_EMAIL   = 'edge@aivoedge.net';
     private const FROM_NAME    = 'AIVO Optimize Support';
 
     private const VALID_CATEGORIES = ['billing', 'technical', 'results', 'account', 'general'];
