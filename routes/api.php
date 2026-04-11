@@ -1,5 +1,7 @@
 <?php
+
 declare(strict_types=1);
+
 use Aivo\Controllers\CheckoutController;
 use Aivo\Controllers\WebhookController;
 use Aivo\Controllers\HealthController;
@@ -8,12 +10,22 @@ use Aivo\Controllers\ProxyController;
 use Aivo\Controllers\EmailController;
 use Aivo\Controllers\ProbeDataController;
 use Aivo\Controllers\AdminController;
+
+// ── Meridian controllers ───────────────────────────────────────────
+use Aivo\Controllers\MeridianAuthController;
+use Aivo\Controllers\MeridianClientController;
+use Aivo\Controllers\MeridianBrandController;
+use Aivo\Controllers\MeridianDashboardController;
+use Aivo\Controllers\MeridianAuditController;
+
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri    = rtrim($uri, '/') ?: '/';
+
 // ── Route table ───────────────────────────────────────────────────
 $routes = [
     'GET'  => [
+        // ── Existing AIVO Optimize routes (unchanged) ──────────
         '/'                       => [HealthController::class,    'index'],
         '/api/health'             => [HealthController::class,    'index'],
         '/probe-intelligence'     => [HealthController::class,    'dashboard'],
@@ -22,13 +34,31 @@ $routes = [
         '/api/probe-data/stats'   => [ProbeDataController::class, 'stats'],
         '/api/admin/users'        => [AdminController::class,     'getUsers'],
         '/api/admin/stats'        => [AdminController::class,     'getStats'],
+
+        // ── Meridian: Auth ─────────────────────────────────────
+        '/api/meridian/auth/me'             => [MeridianAuthController::class,      'me'],
+
+        // ── Meridian: Dashboard ────────────────────────────────
+        '/api/meridian/dashboard'           => [MeridianDashboardController::class, 'overview'],
+        '/api/meridian/dashboard/brands'    => [MeridianDashboardController::class, 'brands'],
+
+        // ── Meridian: Clients ──────────────────────────────────
+        '/api/meridian/clients'             => [MeridianClientController::class,    'list'],
+
+        // ── Meridian: Brands ───────────────────────────────────
+        '/api/meridian/brands'              => [MeridianBrandController::class,     'list'],
+        '/api/meridian/brand'               => [MeridianBrandController::class,     'detail'],
+
+        // ── Meridian: Audits ───────────────────────────────────
+        '/api/meridian/audit/status'        => [MeridianAuditController::class,     'status'],
+        '/api/meridian/audit/history'       => [MeridianAuditController::class,     'history'],
     ],
+
     'POST' => [
-        // Stripe
+        // ── Existing AIVO Optimize routes (unchanged) ──────────
         '/api/create-checkout-session' => [CheckoutController::class,   'createSession'],
         '/api/verify-session'          => [CheckoutController::class,   'verifySession'],
         '/api/webhook'                 => [WebhookController::class,    'handle'],
-        // User management
         '/api/register'                => [OptimizeController::class,   'register'],
         '/api/login'                   => [OptimizeController::class,   'login'],
         '/api/change-password'         => [OptimizeController::class,   'changePassword'],
@@ -38,19 +68,43 @@ $routes = [
         '/api/cancel-subscription'     => [OptimizeController::class,   'cancelSubscription'],
         '/api/delete-account'          => [OptimizeController::class,   'deleteAccount'],
         '/api/probe-event'             => [OptimizeController::class,   'probeEvent'],
-        // AI proxy — keys never leave the server
         '/api/proxy'                   => [ProxyController::class,      'handle'],
         '/api/send-email'              => [EmailController::class,      'handle'],
         '/api/probe-data'              => [ProbeDataController::class,  'store'],
         '/api/probe-data/stats'        => [ProbeDataController::class,  'stats'],
         '/api/admin/set-plan'          => [AdminController::class,      'setPlan'],
         '/api/admin/delete-user'       => [AdminController::class,      'deleteUser'],
+
+        // ── Meridian: Auth ─────────────────────────────────────
+        '/api/meridian/auth/register'       => [MeridianAuthController::class,      'register'],
+        '/api/meridian/auth/login'          => [MeridianAuthController::class,      'login'],
+        '/api/meridian/auth/logout'         => [MeridianAuthController::class,      'logout'],
+        '/api/meridian/auth/forgot'         => [MeridianAuthController::class,      'forgot'],
+        '/api/meridian/auth/reset'          => [MeridianAuthController::class,      'reset'],
+
+        // ── Meridian: Clients ──────────────────────────────────
+        '/api/meridian/clients/create'      => [MeridianClientController::class,    'create'],
+        '/api/meridian/clients/update'      => [MeridianClientController::class,    'update'],
+        '/api/meridian/clients/delete'      => [MeridianClientController::class,    'delete'],
+
+        // ── Meridian: Brands ───────────────────────────────────
+        '/api/meridian/brands/create'       => [MeridianBrandController::class,     'create'],
+        '/api/meridian/brands/update'       => [MeridianBrandController::class,     'update'],
+        '/api/meridian/brands/delete'       => [MeridianBrandController::class,     'delete'],
+        '/api/meridian/brands/prompts'      => [MeridianBrandController::class,     'savePromptsEndpoint'],
+
+        // ── Meridian: Audits ───────────────────────────────────
+        '/api/meridian/audits/initiate'     => [MeridianAuditController::class,     'initiate'],
+        '/api/meridian/audits/complete'     => [MeridianAuditController::class,     'complete'],
     ],
 ];
+
 // ── Dispatch ──────────────────────────────────────────────────────
 $handler = $routes[$method][$uri] ?? null;
+
 if ($handler === null) {
     abort(404, 'Route not found: ' . $method . ' ' . $uri);
 }
+
 [$class, $action] = $handler;
 (new $class)->$action();
