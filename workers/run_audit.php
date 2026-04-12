@@ -115,11 +115,9 @@ foreach ($probeRuns as $run) {
         error_log("[AuditWorker] Probe failed: {$run->platform}/{$run->probe_mode}");
     }
 
-    // Update audit progress after each probe
-    $pct = $probesTotal > 0 ? (int)round(($probesCompleted / $probesTotal) * 100) : 0;
+    // Update audit progress after each probe (no percent_complete column)
     DB::table('meridian_audits')->where('id', $auditId)->update([
         'probes_completed' => $probesCompleted,
-        'percent_complete' => $pct,
         'updated_at'       => now(),
     ]);
 
@@ -290,7 +288,6 @@ $finalStatus = ($probesFailed === $probesTotal) ? 'failed' : 'completed';
 DB::table('meridian_audits')->where('id', $auditId)->update([
     'status'           => $finalStatus,
     'probes_completed' => $probesCompleted,
-    'percent_complete' => $probesCompleted > 0 ? 100 : 0,
     'completed_at'     => now(),
     'updated_at'       => now(),
 ]);
