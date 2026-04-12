@@ -62,11 +62,13 @@ class MeridianProbeEngine
             return false;
         }
 
-        $prompts   = json_decode($audit->prompts ?? '{}', true);
+        // Prompts are stored in raw_config on the probe run (no prompts col on audits)
+        $rawConfig = json_decode($run->raw_config ?? '{}', true);
+        $prompts   = $rawConfig['prompts']    ?? [];
+        $brandName = $rawConfig['brand_name'] ?? $brand->name;
+        $category  = $rawConfig['category']   ?? ($brand->category ?: 'product');
         $platform  = $run->platform;
         $mode      = $run->probe_mode; // 'anchored' or 'generic'
-        $brandName = $brand->name;
-        $category  = $brand->category ?: 'product';
 
         // Mark as running
         DB::table('meridian_probe_runs')->where('id', $probeRunId)->update([
@@ -186,17 +188,24 @@ class MeridianProbeEngine
                 $ditType     = $this->inferDitType($anno);
             }
 
-            // Mark probe complete
+            // Mark probe complete — columns match meridian_probe_runs schema
             DB::table('meridian_probe_runs')->where('id', $probeRunId)->update([
-                'status'              => 'completed',
-                'turns_completed'     => $totalTurns,
-                'dit_turn'            => $ditTurn,
-                'dit_type'            => $ditType,
-                't4_winner'           => $t4Winner,
-                't4_winner_confidence'=> $t4WinnerConfidence,
-                'probe_score'         => $probeScore,
-                'completed_at'        => now(),
-                'updated_at'          => now(),
+                'status'           => 'completed',
+                'turns_completed'  => $totalTurns,
+                'dit_turn'         => $ditTurn,
+                'handoff_turn'     => $totalTurns, // T4 is always the handoff turn
+                't4_winner'        => $t4Winner,
+                'termination_type' => 'turn_limit',
+                'raw_config'       => json_encode(array_merge(
+                    json_decode($run->raw_config ?? '{}', true),
+                    [
+                        'probe_score' => $probeScore,
+                        'dit_type'    => $ditType,
+                        't4_winner_confidence' => $t4WinnerConfidence,
+                    ]
+                )),
+                'completed_at'     => now(),
+                'updated_at'       => now(),
             ]);
 
             error_log("[ProbeEngine] {$platform}/{$mode} complete. Score={$probeScore} DIT={$ditTurn} T4={$t4Winner}");
@@ -474,16 +483,28 @@ PROMPT;
         $runs = DB::table('meridian_probe_runs')
             ->where('audit_id', $auditId)
             ->where('status', 'completed')
-            ->whereNotNull('probe_score')
             ->get();
 
         if ($runs->isEmpty()) return 0;
 
-        $anchoredScores = $runs->where('probe_mode', 'anchored')->pluck('probe_score');
-        $genericScores  = $runs->where('probe_mode', 'generic')->pluck('probe_score');
+        // probe_score is stored in raw_config jsonb (no dedicated column)
+        $anchoredScores = [];
+        $genericScores  = [];
 
-        $anchoredAvg = $anchoredScores->isNotEmpty() ? $anchoredScores->avg() : 0;
-        $genericAvg  = $genericScores->isNotEmpty()  ? $genericScores->avg()  : 0;
+        foreach ($runs as $run) {
+            $rc    = json_decode($run->raw_config ?? '{}', true);
+            $score = $rc['probe_score'] ?? null;
+            if ($score === null) continue;
+
+            if ($run->probe_mode === 'anchored') {
+                $anchoredScores[] = (int)$score;
+            } else {
+                $genericScores[] = (int)$score;
+            }
+        }
+
+        $anchoredAvg = count($anchoredScores) > 0 ? array_sum($anchoredScores) / count($anchoredScores) : 0;
+        $genericAvg  = count($genericScores)  > 0 ? array_sum($genericScores)  / count($genericScores)  : 0;
 
         $rcs = ($anchoredAvg * 0.70) + ($genericAvg * 0.30);
         return (int)round($rcs);
