@@ -155,7 +155,7 @@ $journeyRuns = $completedRuns->map(function ($run) {
     // Get final turn data for handoff info
     $finalTurn = DB::table('meridian_probe_turns')
         ->where('probe_run_id', $run->id)
-        ->orderByDesc('turn_num')
+        ->orderByDesc('turn_number')
         ->first();
 
     $finalAnno = $finalTurn ? json_decode($finalTurn->annotation ?? '{}', true) : [];
@@ -168,10 +168,10 @@ $journeyRuns = $completedRuns->map(function ($run) {
         'ditType'         => $run->dit_type,
         'displacingBrand' => $run->t4_winner,
         'handoffTurn'     => 4,
-        'brandAtHandoff'  => ($finalTurn && $finalTurn->brand_citation_survived) ? 'present' : 'absent',
+        'brandAtHandoff'  => ($finalTurn && $finalTurn->brand_presence === 'present') ? 'present' : 'absent',
         'terminationType' => 'turn_limit',
         'genericResult'   => $run->probe_mode === 'generic'
-            ? (($finalTurn && $finalTurn->brand_citation_survived) ? 'present' : 'absent')
+            ? (($finalTurn && $finalTurn->brand_presence === 'present') ? 'present' : 'absent')
             : null,
     ];
 })->toArray();
@@ -188,20 +188,22 @@ foreach ($platforms as $platform) {
 
     $turns = DB::table('meridian_probe_turns')
         ->where('probe_run_id', $anchoredRun->id)
-        ->orderBy('turn_num')
+        ->orderBy('turn_number')
         ->get();
 
     // Five pre-investment questions
-    $t1Pass = (bool)($turns->firstWhere('turn_num', 1)?->brand_citation_survived ?? false);
-    $t4Pass = (bool)($turns->firstWhere('turn_num', 4)?->brand_citation_survived ?? false);
-    $t4Turn = $turns->firstWhere('turn_num', 4);
+    $t1Row  = $turns->firstWhere('turn_number', 1);
+    $t4Row  = $turns->firstWhere('turn_number', 4);
+    $t1Pass = ($t1Row?->brand_presence ?? 'absent') === 'present';
+    $t4Pass = ($t4Row?->brand_presence ?? 'absent') === 'present';
+    $t4Turn = $t4Row;
     $t4Anno = $t4Turn ? json_decode($t4Turn->annotation ?? '{}', true) : [];
 
     $genericRun   = $platformRuns->firstWhere('probe_mode', 'generic');
     $genericT4    = $genericRun
-        ? DB::table('meridian_probe_turns')->where('probe_run_id', $genericRun->id)->where('turn_num', 4)->first()
+        ? DB::table('meridian_probe_turns')->where('probe_run_id', $genericRun->id)->where('turn_number', 4)->first()
         : null;
-    $genericPass  = (bool)($genericT4?->brand_citation_survived ?? false);
+    $genericPass  = ($genericT4?->brand_presence ?? 'absent') === 'present';
 
     $platformScore = (int)($anchoredRun->probe_score ?? 0);
     $platformVerdict = $engine->determineVerdict($platformScore);
