@@ -22,17 +22,17 @@ $allowedOrigins = array_filter(array_map('trim', explode(',', $rawOrigins)));
 $origin         = $_SERVER['HTTP_ORIGIN'] ?? '';
 
 $allowAll = in_array('*', $allowedOrigins);
-$allowed  = $allowAll || ($origin && in_array($origin, $allowedOrigins));
 
-if ($allowed && $origin) {
-    // Always echo back the exact origin — required for credentials
+if (!$origin) {
+    // No origin header — server-to-server or direct request (e.g. healthcheck)
+    // CORS does not apply — allow through
+    header('Access-Control-Allow-Origin: *');
+} elseif ($allowAll || in_array($origin, $allowedOrigins)) {
+    // Known origin — echo back exact origin (required when credentials: true)
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Vary: Origin');
-} elseif ($allowed && !$origin) {
-    // No origin header — direct/server request, use wildcard
-    header('Access-Control-Allow-Origin: *');
 } else {
-    // Origin not permitted
+    // Unknown origin — block
     header('Access-Control-Allow-Origin: null');
     http_response_code(403);
     echo json_encode(['error' => 'Origin not allowed']);
