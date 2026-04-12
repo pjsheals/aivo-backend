@@ -14,18 +14,28 @@ try {
 // ── Bootstrap ────────────────────────────────────────────────────
 require BASE_PATH . '/src/bootstrap.php';
 // ── CORS ─────────────────────────────────────────────────────────
-$allowedOrigins = array_filter(array_map('trim', explode(',', env('ALLOWED_ORIGINS', '*'))));
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-if (in_array('*', $allowedOrigins)) {
-    header('Access-Control-Allow-Origin: *');
-} elseif ($origin && in_array($origin, $allowedOrigins)) {
+// When credentials are enabled, Access-Control-Allow-Origin must be
+// the exact origin — not '*'. So we always echo back the requesting
+// origin if it is in the allowlist, or if ALLOWED_ORIGINS = *.
+$rawOrigins     = env('ALLOWED_ORIGINS', '*');
+$allowedOrigins = array_filter(array_map('trim', explode(',', $rawOrigins)));
+$origin         = $_SERVER['HTTP_ORIGIN'] ?? '';
+
+$allowAll = in_array('*', $allowedOrigins);
+$allowed  = $allowAll || ($origin && in_array($origin, $allowedOrigins));
+
+if ($allowed && $origin) {
+    // Always echo back the exact origin — required for credentials
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Vary: Origin');
-} elseif (!$origin) {
+} elseif ($allowed && !$origin) {
+    // No origin header — direct/server request, use wildcard
     header('Access-Control-Allow-Origin: *');
 } else {
+    // Origin not permitted
+    header('Access-Control-Allow-Origin: null');
     http_response_code(403);
-    echo json_encode(['error' => 'Origin not allowed: ' . $origin]);
+    echo json_encode(['error' => 'Origin not allowed']);
     exit;
 }
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
