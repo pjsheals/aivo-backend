@@ -247,7 +247,9 @@ class MeridianAuditController
             'audit' => [
                 'id'              => (int)$audit->id,
                 'status'          => $audit->status,
-                'percentComplete' => (int)$audit->percent_complete,
+                'percentComplete' => $audit->probes_total > 0
+                    ? (int)round(($audit->probes_completed / $audit->probes_total) * 100)
+                    : 0,
                 'probesCompleted' => (int)$audit->probes_completed,
                 'probesTotal'     => (int)$audit->probes_total,
                 'errorMessage'    => $audit->error_message,
