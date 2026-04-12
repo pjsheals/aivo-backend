@@ -102,15 +102,16 @@ class MeridianProbeEngine
                 if ($modelResult === null) {
                     // Fatal model failure on this turn
                     $turns[] = [
-                        'turn_num'   => $turnNum,
-                        'user_message' => $userMsg,
-                        'response_text' => '',
-                        'citation_urls' => '[]',
-                        'annotation'    => null,
-                        'brand_citation_survived' => false,
-                        'displacement_signal' => 'complete',
-                        'dit_fired' => false,
-                        'error' => 'Model call failed after retry',
+                        'turn_number'     => $turnNum,
+                        'user_prompt'     => $userMsg,
+                        'model_response'  => '',
+                        'citation_urls'   => json_encode(['urls' => [], 'annotation' => null]),
+                        'is_dit_turn'     => false,
+                        'is_handoff_turn' => ($turnNum === $totalTurns),
+                        'brand_presence'  => 'absent',
+                        '_brand_survived' => false,
+                        '_annotation'     => null,
+                        '_error'          => 'Model call failed after retry',
                     ];
                     // For T1/T2 failures, abort this probe
                     if ($turnNum <= 2) {
@@ -146,19 +147,20 @@ class MeridianProbeEngine
                 }
 
                 $turns[] = [
-                    'turn_num'               => $turnNum,
-                    'user_message'           => $userMsg,
-                    'response_text'          => $responseText,
-                    'citation_urls'          => json_encode($citationUrls),
-                    'annotation'             => json_encode($annotation),
-                    'dominant_source_type'   => $annotation['dominant_type'] ?? null,
-                    'brand_citation_survived'=> $brandSurvived,
-                    'displacement_signal'    => $annotation['displacement_signal'] ?? 'none',
-                    'journey_stage'          => $annotation['journey_stage'] ?? null,
-                    'key_finding'            => $annotation['key_finding'] ?? null,
-                    'dit_fired'              => $ditFired,
-                    'is_acceptance_phrase'   => false,
-                    'error'                  => null,
+                    'turn_number'      => $turnNum,
+                    'user_prompt'      => $userMsg,
+                    'model_response'   => $responseText,
+                    'citation_urls'    => json_encode([
+                        'urls'       => $citationUrls,
+                        'annotation' => $annotation,
+                    ]),
+                    'is_dit_turn'      => $ditFired,
+                    'is_handoff_turn'  => $isFinal,
+                    'brand_presence'   => $brandSurvived ? 'present' : 'absent',
+                    // Internal only — used for scoring, not stored as separate column
+                    '_brand_survived'  => $brandSurvived,
+                    '_annotation'      => $annotation,
+                    '_error'           => null,
                 ];
 
                 // Update turns_completed counter
@@ -168,13 +170,22 @@ class MeridianProbeEngine
                 ]);
             }
 
-            // Save all turns to DB
+            // Save all turns to DB — columns match meridian_probe_turns schema
             foreach ($turns as $turn) {
-                DB::table('meridian_probe_turns')->insert(array_merge($turn, [
-                    'probe_run_id' => $probeRunId,
-                    'audit_id'     => $run->audit_id,
-                    'created_at'   => now(),
-                ]));
+                DB::table('meridian_probe_turns')->insert([
+                    'probe_run_id'   => $probeRunId,
+                    'audit_id'       => $run->audit_id,
+                    'agency_id'      => $run->agency_id,
+                    'brand_id'       => $run->brand_id,
+                    'turn_number'    => $turn['turn_number'],
+                    'user_prompt'    => $turn['user_prompt'],
+                    'model_response' => $turn['model_response'],
+                    'citation_urls'  => $turn['citation_urls'],
+                    'is_dit_turn'    => $turn['is_dit_turn'],
+                    'is_handoff_turn'=> $turn['is_handoff_turn'],
+                    'brand_presence' => $turn['brand_presence'],
+                    'created_at'     => now(),
+                ]);
             }
 
             // Compute probe-level score (CODA weighting)
@@ -183,8 +194,8 @@ class MeridianProbeEngine
             // Determine DIT type from annotation
             $ditType = null;
             if ($ditTurn !== null) {
-                $ditTurnData = collect($turns)->firstWhere('turn_num', $ditTurn);
-                $anno        = json_decode($ditTurnData['annotation'] ?? '{}', true);
+                $ditTurnData = collect($turns)->firstWhere('turn_number', $ditTurn);
+                $anno        = $ditTurnData['_annotation'] ?? [];
                 $ditType     = $this->inferDitType($anno);
             }
 
@@ -463,8 +474,8 @@ PROMPT;
         $score   = 0;
 
         foreach ($turns as $turn) {
-            $t       = (int)($turn['turn_num'] ?? 0);
-            $survived = (bool)($turn['brand_citation_survived'] ?? false);
+            $t        = (int)($turn['turn_number'] ?? 0);
+            $survived = (bool)($turn['_brand_survived'] ?? false);
             if ($survived && isset($weights[$t])) {
                 $score += $weights[$t];
             }
@@ -532,23 +543,26 @@ PROMPT;
         foreach ($runs as $run) {
             $turns = DB::table('meridian_probe_turns')
                 ->where('probe_run_id', $run->id)
-                ->orderBy('turn_num')
+                ->orderBy('turn_number')
                 ->get();
 
-            $t4 = $turns->firstWhere('turn_num', 4) ?? $turns->last();
-            $t1 = $turns->firstWhere('turn_num', 1);
+            $t4 = $turns->firstWhere('turn_number', 4) ?? $turns->last();
+            $t1 = $turns->firstWhere('turn_number', 1);
             if (!$t4) continue;
 
-            $t4Anno = json_decode($t4->annotation ?? '{}', true);
-            $t1Anno = json_decode($t1->annotation ?? '{}', true);
+            // annotation stored in citation_urls jsonb as {'urls':[], 'annotation':{}}
+            $t4CitData = json_decode($t4->citation_urls ?? '{}', true);
+            $t1CitData = json_decode($t1->citation_urls ?? '{}', true);
+            $t4Anno = $t4CitData['annotation'] ?? [];
+            $t1Anno = $t1CitData['annotation'] ?? [];
 
             $t4Summary[] = [
                 'platform'         => $run->platform,
                 'probe_mode'       => $run->probe_mode,
                 't1_dominant'      => $t1Anno['dominant_type'] ?? null,
-                't1_brand_cited'   => (bool)($t1->brand_citation_survived ?? true),
+                't1_brand_cited'   => ($t1->brand_presence ?? 'present') === 'present',
                 't4_dominant'      => $t4Anno['dominant_type'] ?? null,
-                't4_brand_cited'   => (bool)($t4->brand_citation_survived ?? false),
+                't4_brand_cited'   => ($t4->brand_presence ?? 'absent') === 'present',
                 't4_displacement'  => $t4Anno['displacement_signal'] ?? 'none',
                 't4_source_types'  => array_map(fn($s) => [
                     'type'        => $s['type'] ?? '',
