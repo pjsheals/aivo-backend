@@ -270,12 +270,33 @@ try {
         ]));
     }
 
-    // Update brand's current RCS + verdict for dashboard cards
+    // Update brand cached scores for dashboard cards — exact column names confirmed
+    $ditChatgpt    = null;
+    $ditGemini     = null;
+    $ditPerplexity = null;
+    $ditGrok       = null;
+
+    foreach ($completedRuns as $run) {
+        if ($run->probe_mode !== 'anchored') continue;
+        $ditVal = $run->dit_turn ? (int)$run->dit_turn : null;
+        switch ($run->platform) {
+            case 'chatgpt':    $ditChatgpt    = $ditVal; break;
+            case 'gemini':     $ditGemini     = $ditVal; break;
+            case 'perplexity': $ditPerplexity = $ditVal; break;
+            case 'grok':       $ditGrok       = $ditVal; break;
+        }
+    }
+
     DB::table('meridian_brands')->where('id', $audit->brand_id)->update([
-        'current_rcs'      => $rcs,
-        'ad_verdict'       => $verdict,
-        'last_audited_at'  => now(),
-        'updated_at'       => now(),
+        'current_rcs'           => $rcs,
+        'current_ad_verdict'    => $verdict,
+        'current_rar'           => $rar ? round($rar) : null,
+        'current_dit_chatgpt'   => $ditChatgpt,
+        'current_dit_gemini'    => $ditGemini,
+        'current_dit_perplexity'=> $ditPerplexity,
+        'current_dit_grok'      => $ditGrok,
+        'last_audited_at'       => now(),
+        'updated_at'            => now(),
     ]);
 
     error_log("[AuditWorker] Results stored. RCS={$rcs} Verdict={$verdict} RAR=" . ($rar ? number_format($rar) : 'N/A'));
