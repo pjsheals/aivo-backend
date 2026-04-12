@@ -17,6 +17,7 @@ use Aivo\Controllers\MeridianClientController;
 use Aivo\Controllers\MeridianBrandController;
 use Aivo\Controllers\MeridianDashboardController;
 use Aivo\Controllers\MeridianAuditController;
+use Aivo\Controllers\MeridianSuperadminController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -52,6 +53,13 @@ $routes = [
         // ── Meridian: Audits ───────────────────────────────────
         '/api/meridian/audit/status'        => [MeridianAuditController::class,     'status'],
         '/api/meridian/audit/history'       => [MeridianAuditController::class,     'history'],
+
+        // ── Meridian: Superadmin ───────────────────────────────
+        '/api/meridian/admin/agencies'      => [MeridianSuperadminController::class, 'agencies'],
+        '/api/meridian/admin/usage'         => [MeridianSuperadminController::class, 'usage'],
+        '/api/meridian/admin/audits'        => [MeridianSuperadminController::class, 'audits'],
+        '/api/meridian/admin/corpus'        => [MeridianSuperadminController::class, 'corpus'],
+        '/api/meridian/admin/methodology'   => [MeridianSuperadminController::class, 'methodology'],
     ],
 
     'POST' => [
@@ -96,6 +104,15 @@ $routes = [
         // ── Meridian: Audits ───────────────────────────────────
         '/api/meridian/audits/initiate'     => [MeridianAuditController::class,     'initiate'],
         '/api/meridian/audits/complete'     => [MeridianAuditController::class,     'complete'],
+
+        // ── Meridian: Superadmin ───────────────────────────────
+        '/api/meridian/admin/login'                  => [MeridianSuperadminController::class, 'login'],
+        '/api/meridian/admin/logout'                 => [MeridianSuperadminController::class, 'logout'],
+        '/api/meridian/admin/agencies/set-plan'      => [MeridianSuperadminController::class, 'setPlan'],
+        '/api/meridian/admin/agencies/suspend'       => [MeridianSuperadminController::class, 'suspend'],
+        '/api/meridian/admin/agencies/unsuspend'     => [MeridianSuperadminController::class, 'unsuspend'],
+        '/api/meridian/admin/audits/rerun'           => [MeridianSuperadminController::class, 'rerun'],
+        '/api/meridian/admin/methodology/publish'    => [MeridianSuperadminController::class, 'publishMethodology'],
     ],
 ];
 
