@@ -257,7 +257,7 @@ class MeridianBrandController
             'currentDitPerplexity'=> isset($b->current_dit_perplexity) ? (int)$b->current_dit_perplexity : null,
             'currentDitGrok'      => isset($b->current_dit_grok) ? (int)$b->current_dit_grok : null,
             'currentRar'          => isset($b->current_rar) && $b->current_rar ? (float)$b->current_rar : null,
-            'adVerdict'           => $b->ad_verdict ?? null,
+            'adVerdict'           => $b->current_ad_verdict ?? null,
             'createdAt'           => $b->created_at,
             'updatedAt'           => $b->updated_at,
         ];
