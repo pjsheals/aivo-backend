@@ -106,23 +106,41 @@ class MeridianAuditController
         $probeModes  = ['anchored', 'generic'];
         $probesTotal = count($platforms) * count($probeModes);
 
+        // ── Resolve methodology version (NOT NULL column) ────────
+        $methodologyVersion = DB::table('meridian_methodology_versions')
+            ->orderBy('id', 'desc')
+            ->first();
+
+        if (!$methodologyVersion) {
+            // Seed the first version if table is empty
+            $methodologyVersionId = DB::table('meridian_methodology_versions')->insertGetId([
+                'name'       => 'AIVO DPA v1',
+                'version'    => '1.0',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        } else {
+            $methodologyVersionId = $methodologyVersion->id;
+        }
+
         try {
             DB::beginTransaction();
 
             // Create audit record — columns match meridian_audits schema exactly
             $auditId = DB::table('meridian_audits')->insertGetId([
-                'agency_id'            => $auth->agency_id,
-                'client_id'            => $brand->client_id ?? null,
-                'brand_id'             => $brandId,
-                'audit_type'           => $auditType,
-                'status'               => 'queued',
-                'initiated_by_user_id' => $auth->user->id,
-                'initiated_by'         => $auth->user->email,
-                'platforms'            => json_encode($platforms),
-                'probes_total'         => $probesTotal,
-                'probes_completed'     => 0,
-                'created_at'           => now(),
-                'updated_at'           => now(),
+                'agency_id'              => $auth->agency_id,
+                'client_id'              => $brand->client_id ?? null,
+                'brand_id'               => $brandId,
+                'audit_type'             => $auditType,
+                'status'                 => 'queued',
+                'initiated_by_user_id'   => $auth->user->id,
+                'initiated_by'           => $auth->user->email,
+                'methodology_version_id' => $methodologyVersionId,
+                'platforms'              => json_encode($platforms),
+                'probes_total'           => $probesTotal,
+                'probes_completed'       => 0,
+                'created_at'             => now(),
+                'updated_at'             => now(),
             ]);
 
             // Create one probe_run per platform × mode
@@ -131,12 +149,13 @@ class MeridianAuditController
                 foreach ($probeModes as $mode) {
                     $instrument = $mode === 'anchored' ? 'DPA Anchored' : 'DPA Generic';
                     DB::table('meridian_probe_runs')->insert([
-                        'audit_id'        => $auditId,
-                        'brand_id'        => $brandId,
-                        'agency_id'       => $auth->agency_id,
-                        'instrument'      => $instrument,
-                        'platform'        => $platform,
-                        'probe_mode'      => $mode,
+                        'audit_id'               => $auditId,
+                        'brand_id'               => $brandId,
+                        'agency_id'              => $auth->agency_id,
+                        'methodology_version_id' => $methodologyVersionId,
+                        'instrument'             => $instrument,
+                        'platform'               => $platform,
+                        'probe_mode'             => $mode,
                         'status'          => 'queued',
                         'turns_completed' => 0,
                         'raw_config'      => json_encode([
