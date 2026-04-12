@@ -19,16 +19,24 @@ if (!$secret || $secret !== $expected) {
     exit;
 }
 
-// DB connection
-$dsn = getenv('DATABASE_URL');
-if (!$dsn) {
+// DB connection — parse Railway's DATABASE_URL into PDO DSN
+$dbUrl = getenv('DATABASE_URL');
+if (!$dbUrl) {
     http_response_code(500);
     echo json_encode(['error' => 'DATABASE_URL not set']);
     exit;
 }
 
 try {
-    $pdo = new PDO($dsn, null, null, [
+    $parts = parse_url($dbUrl);
+    $host   = $parts['host'];
+    $port   = $parts['port'] ?? 5432;
+    $dbname = ltrim($parts['path'], '/');
+    $user   = $parts['user'];
+    $pass   = $parts['pass'];
+
+    $dsn = "pgsql:host={$host};port={$port};dbname={$dbname};sslmode=require";
+    $pdo = new PDO($dsn, $user, $pass, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
     ]);
