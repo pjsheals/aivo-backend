@@ -109,33 +109,41 @@ class MeridianAuditController
         try {
             DB::beginTransaction();
 
-            // Create audit record
+            // Create audit record — columns match meridian_audits schema exactly
             $auditId = DB::table('meridian_audits')->insertGetId([
-                'agency_id'       => $auth->agency_id,
-                'brand_id'        => $brandId,
-                'initiated_by'    => $auth->user->id,
-                'audit_type'      => $auditType,
-                'status'          => 'queued',
-                'platforms'       => json_encode($platforms),
-                'prompts'         => json_encode($resolvedPrompts),
-                'probes_total'    => $probesTotal,
-                'probes_completed'=> 0,
-                'percent_complete'=> 0,
-                'created_at'      => now(),
-                'updated_at'      => now(),
+                'agency_id'            => $auth->agency_id,
+                'client_id'            => $brand->client_id ?? null,
+                'brand_id'             => $brandId,
+                'audit_type'           => $auditType,
+                'status'               => 'queued',
+                'initiated_by_user_id' => $auth->user->id,
+                'initiated_by'         => $auth->user->email,
+                'platforms'            => json_encode($platforms),
+                'probes_total'         => $probesTotal,
+                'probes_completed'     => 0,
+                'created_at'           => now(),
+                'updated_at'           => now(),
             ]);
 
-            // Create one probe_run record per platform × mode
+            // Create one probe_run per platform × mode
+            // Prompts stored in raw_config jsonb — no prompts column on audits table
             foreach ($platforms as $platform) {
                 foreach ($probeModes as $mode) {
+                    $instrument = $mode === 'anchored' ? 'DPA Anchored' : 'DPA Generic';
                     DB::table('meridian_probe_runs')->insert([
                         'audit_id'        => $auditId,
                         'brand_id'        => $brandId,
                         'agency_id'       => $auth->agency_id,
+                        'instrument'      => $instrument,
                         'platform'        => $platform,
                         'probe_mode'      => $mode,
                         'status'          => 'queued',
                         'turns_completed' => 0,
+                        'raw_config'      => json_encode([
+                            'prompts'    => $resolvedPrompts,
+                            'brand_name' => $brandName,
+                            'category'   => $category,
+                        ]),
                         'created_at'      => now(),
                         'updated_at'      => now(),
                     ]);
