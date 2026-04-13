@@ -18,6 +18,7 @@ use Aivo\Controllers\MeridianBrandController;
 use Aivo\Controllers\MeridianDashboardController;
 use Aivo\Controllers\MeridianAuditController;
 use Aivo\Controllers\MeridianSuperadminController;
+use Aivo\Controllers\MeridianRemediationController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -53,6 +54,9 @@ $routes = [
         // ── Meridian: Audits ───────────────────────────────────
         '/api/meridian/audit/status'        => [MeridianAuditController::class,     'status'],
         '/api/meridian/audit/history'       => [MeridianAuditController::class,     'history'],
+
+        // ── Meridian: Remediation ──────────────────────────────
+        '/api/meridian/remediation'         => [MeridianRemediationController::class, 'fetch'],
 
         // ── Meridian: Superadmin ───────────────────────────────
         '/api/meridian/admin/agencies'      => [MeridianSuperadminController::class, 'agencies'],
@@ -104,6 +108,9 @@ $routes = [
         // ── Meridian: Audits ───────────────────────────────────
         '/api/meridian/audits/initiate'     => [MeridianAuditController::class,     'initiate'],
         '/api/meridian/audits/complete'     => [MeridianAuditController::class,     'complete'],
+
+        // ── Meridian: Remediation ──────────────────────────────
+        '/api/meridian/remediation/generate' => [MeridianRemediationController::class, 'generate'],
 
         // ── Meridian: Superadmin ───────────────────────────────
         '/api/meridian/admin/login'                  => [MeridianSuperadminController::class, 'login'],
