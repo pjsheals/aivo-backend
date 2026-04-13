@@ -408,6 +408,7 @@ class MeridianBrandController
             return [
                 'platform'        => $run->platform,
                 'probeMode'       => $run->probe_mode,
+                'isUndirected'    => (bool)($rc['undirected'] ?? false),
                 'totalTurns'      => (int)$run->turns_completed,
                 'ditTurn'         => $run->dit_turn ? (int)$run->dit_turn : null,
                 'ditType'         => $rc['dit_type'] ?? null,
@@ -460,47 +461,23 @@ class MeridianBrandController
                 default       => 'citation layer displacement',
             };
 
-            // ── Three-category verdict logic ──────────────────────────────
-            //
-            // Category 1 — do_not_advertise
-            //   DIT fires at T1 or T2: brand loses the reasoning chain before
-            //   comparison or criteria evaluation. Advertising into a hostile
-            //   context where a competitor preference is already formed.
-            //
-            // Category 2 — advertise_with_caution
-            //   Brand present T1–T3 but loses T4 (DIT T3, or competitor wins T4):
-            //   brand entered consideration but didn't take the purchase recommendation.
-            //   LLM advertising at criteria stage can reinforce presence.
-            //
-            // Category 3 — amplification_ready
-            //   Null DIT (brand held throughout) or brand explicitly won T4:
-            //   brand holds the reasoning chain to purchase. Ad spend converts
-            //   organic recommendation into controlled destination routing.
-
             if ($ditTurn !== null && $ditTurn <= 2) {
-                // Category 1: Early structural displacement
                 $platformVerdict  = 'do_not_advertise';
                 $verdictRationale = 'Resolve reasoning chain displacement before committing LLM ad budget. '
                     . 'Sponsored placements appear after the model has already formed a competitor preference'
                     . ($competitor ? " — {$competitor} holds the reasoning chain on this platform" : '')
                     . '. Your spend would amplify absence, not presence.';
-
             } elseif ($ditTurn === null && !$competitorWonT4) {
-                // Category 3: Null DIT — brand held primary throughout
                 $platformVerdict  = 'amplification_ready';
                 $verdictRationale = 'Brand holds the reasoning chain to purchase. '
                     . 'Advertising here converts organic recommendation into controlled routing — '
                     . 'deploy LLM ad spend to direct the commercial handoff to your preferred destination.';
-
             } elseif ($brandWonT4) {
-                // Category 3: Brand explicitly won T4
                 $platformVerdict  = 'amplification_ready';
                 $verdictRationale = 'Brand wins the T4 purchase recommendation on this platform. '
                     . 'Advertising here converts organic recommendation into controlled routing — '
                     . 'deploy LLM ad spend to direct the commercial handoff to your preferred destination.';
-
             } else {
-                // Category 2: Present T1–T3 but loses T4 (DIT T3 or competitor wins)
                 $platformVerdict  = 'advertise_with_caution';
                 $verdictRationale = 'Brand enters the consideration set but loses the purchase decision'
                     . ($competitor ? " to {$competitor}" : '')
@@ -614,6 +591,7 @@ class MeridianBrandController
                 'platform'      => $run->platform,
                 'probeMode'     => $run->probe_mode,
                 'instrument'    => $run->instrument ?? 'DPA',
+                'isUndirected'  => (bool)($rc['undirected'] ?? false),
                 'status'        => $run->status,
                 'ditTurn'       => $run->dit_turn ? (int)$run->dit_turn : null,
                 'ditType'       => $rc['dit_type'] ?? null,
