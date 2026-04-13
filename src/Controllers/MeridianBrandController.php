@@ -315,17 +315,22 @@ class MeridianBrandController
 
         $brief = $result ? json_decode($result->citation_brief ?? 'null', true) : null;
 
+        // ── Full per-turn annotation data for Citation Persistence Map ──
+        $probeRunDetails = $this->getProbeRunDetails($probeRuns, $brand->name);
+
         return [
-            'auditId'       => $auditId,
-            'completedAt'   => $audit->completed_at,
-            'auditType'     => $audit->audit_type,
-            'platforms'     => json_decode($audit->platforms ?? '[]', true),
-            'rcs'           => $rcs,
-            'rar'           => $rar,
-            'journeyRuns'   => $journeyRuns ?? [],
-            'adVerdicts'    => $adVerdicts  ?? [],
-            'citationBrief' => $brief,
-            'dpaRuns'       => [],
+            'auditId'          => $auditId,
+            'completedAt'      => $audit->completed_at,
+            'auditType'        => $audit->audit_type,
+            'instrumentType'   => $audit->instrument_type ?? 'directed_bjp',
+            'platforms'        => json_decode($audit->platforms ?? '[]', true),
+            'rcs'              => $rcs,
+            'rar'              => $rar,
+            'journeyRuns'      => $journeyRuns ?? [],
+            'adVerdicts'       => $adVerdicts  ?? [],
+            'citationBrief'    => $brief,
+            'probeRunDetails'  => $probeRunDetails,
+            'dpaRuns'          => [],
         ];
     }
 
@@ -474,6 +479,96 @@ class MeridianBrandController
         }
 
         return $result;
+    }
+
+    /**
+     * Return full per-turn annotation data for the Citation Persistence Map.
+     * Reads from meridian_probe_turns — annotation stored in citation_urls jsonb.
+     */
+    private function getProbeRunDetails($probeRuns, string $brandName): array
+    {
+        $SOURCE_TYPES = [
+            'reference_authority', 'brand_editorial', 'clinical_science',
+            'community_forum', 'brand_owned', 'retail_commerce', 'general_web'
+        ];
+
+        $details = [];
+
+        foreach ($probeRuns as $run) {
+            $turns = DB::table('meridian_probe_turns')
+                ->where('probe_run_id', $run->id)
+                ->orderBy('turn_number')
+                ->get();
+
+            $turnsOut = $turns->map(function ($turn) use ($brandName) {
+                $citData    = json_decode($turn->citation_urls ?? '{}', true);
+                $annotation = $citData['annotation'] ?? null;
+                $urls       = $citData['urls'] ?? [];
+
+                // Classify destination for each URL (Perplexity only)
+                $classifiedUrls = array_map(function ($url) use ($brandName) {
+                    $host = '';
+                    try { $host = parse_url($url, PHP_URL_HOST) ?? ''; } catch (\Throwable $e) {}
+                    $host = strtolower(str_replace('www.', '', $host));
+
+                    $type = 'general_web';
+                    if (str_contains($host, strtolower(str_replace(' ', '', $brandName))) ||
+                        str_contains($host, strtolower(explode(' ', $brandName)[0]))) {
+                        $type = 'brand_com';
+                    } elseif (preg_match('/sephora|ulta|lookfantastic|boots|asos|amazon|nordstrom|net-a-porter|dermstore|cultbeauty/', $host)) {
+                        $type = 'retailer';
+                    } elseif (preg_match('/reddit|mumsnet|makeupally|beautyboard|forum/', $host)) {
+                        $type = 'community';
+                    } elseif (preg_match('/vogue|allure|byrdie|harpers|elle|glamour|refinery29|cosmopolitan|instyle/', $host)) {
+                        $type = 'editorial';
+                    } elseif (preg_match('/ncbi|nih|pubmed|aad\.org|dermatol|healthline|webmd|mayoclinic/', $host)) {
+                        $type = 'clinical';
+                    }
+
+                    return ['url' => $url, 'host' => $host, 'destination_type' => $type];
+                }, $urls);
+
+                return [
+                    'turnNumber'       => (int)$turn->turn_number,
+                    'userPrompt'       => $turn->user_prompt,
+                    'brandPresence'    => $turn->brand_presence,
+                    'isDitTurn'        => (bool)$turn->is_dit_turn,
+                    'isHandoffTurn'    => (bool)$turn->is_handoff_turn,
+                    'isAcceptPhrase'   => (bool)($turn->is_acceptance_phrase ?? false),
+                    'annotation'       => $annotation,
+                    'citationUrls'     => $classifiedUrls,
+                ];
+            })->values()->toArray();
+
+            // Compute T1 source type survival per turn
+            $t1Types = collect($turnsOut[0]['annotation']['source_types'] ?? [])
+                ->pluck('type')->toArray();
+
+            $survivalRates = array_map(function ($turn) use ($t1Types) {
+                $turnTypes = collect($turn['annotation']['source_types'] ?? [])->pluck('type')->toArray();
+                $survived  = count(array_intersect($t1Types, $turnTypes));
+                return $t1Types ? round(($survived / count($t1Types)) * 100) : 0;
+            }, $turnsOut);
+
+            $rc = json_decode($run->raw_config ?? '{}', true);
+
+            $details[] = [
+                'probeRunId'    => (int)$run->id,
+                'platform'      => $run->platform,
+                'probeMode'     => $run->probe_mode,
+                'instrument'    => $run->instrument ?? 'DPA',
+                'status'        => $run->status,
+                'ditTurn'       => $run->dit_turn ? (int)$run->dit_turn : null,
+                'ditType'       => $rc['dit_type'] ?? null,
+                't4Winner'      => $run->t4_winner,
+                'probeScore'    => (int)($rc['probe_score'] ?? 0),
+                'turns'         => $turnsOut,
+                't1SourceTypes' => $t1Types,
+                'survivalRates' => $survivalRates,
+            ];
+        }
+
+        return $details;
     }
 
     private function savePrompts(int $brandId, int $agencyId, array $prompts): void
