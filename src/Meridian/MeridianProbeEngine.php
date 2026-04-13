@@ -576,32 +576,77 @@ PROMPT;
         $summary = json_encode(['brand' => $brandName, 'category' => $category, 'platforms' => $t4Summary], JSON_PRETTY_PRINT);
 
         $prompt = <<<PROMPT
-You are a citation architecture strategist. Analyse this DPA (Decision-stage Probe Analysis) result for "{$brandName}" ({$category}).
+You are a senior citation architecture strategist at an AI measurement agency. Analyse this multi-platform DPA (Decision-stage Probe Analysis) result for "{$brandName}" ({$category}).
 
-CRITICAL: Focus on T4 — the purchase decision turn. t4_brand_cited=false means the brand was displaced at the moment that determines who wins the sale.
+CONTEXT: DPA runs a 4-turn buying conversation: T1=awareness, T2=comparison, T3=five-criteria optimisation, T4=purchase decision. DIT (Displacement Initiation Turn) marks when the brand loses primary citation position. T4 winner is the brand that captures the purchase recommendation.
 
+PLATFORM REASONING PATTERNS (apply these when building platform-specific interventions):
+- ChatGPT: Training data citations. Displacement is structural. T1/T2 citation architecture interventions take 8-16 weeks to propagate. T3 volatile content has no effect.
+- Gemini: Educational Drift Arc pattern. Displaces via clinical/educational framing at T2-T3. Requires brand-specific content density and clinical credibility in training data. Different fix from ChatGPT.
+- Perplexity: Live web retrieval. Displacement is volatile — can be addressed in 2-4 weeks via T3 content. Citation URLs are direct evidence of what is driving displacement.
+- Grok: Requires primary criterion ownership and definitional authority.
+
+DATA:
 {$summary}
+
+INSTRUCTIONS:
+1. Identify the specific competitor(s) winning at T4 by platform — name them explicitly
+2. Identify the exact source types and named publications driving each competitor's T4 win
+3. Build platform-specific intervention routes — the fix for ChatGPT and Gemini are structurally different
+4. Sequence interventions with dependencies: T1 foundation must precede T2 authority, T2 authority must precede T3 volume
+5. Provide realistic timelines per platform based on retrieval mechanism (training data vs live)
+6. Contrast what first-prompt visibility tools would show vs what T4 analysis reveals — without naming specific competitor tools
 
 Return ONLY valid JSON:
 {
-  "key_finding": "one sentence about what happens at T4 — not T1",
-  "t_final_winning_sources": ["source types dominant at T4"],
-  "brand_gaps": ["T4 source types where brand_cited is false"],
-  "interventions": [{
-    "priority": 1,
-    "action": "specific action targeting the T4 citation gap",
-    "target_type": "source type key",
-    "target_publications": ["specific publication names"],
-    "rationale": "why this closes the T4 gap",
-    "timeline": "realistic timeline"
-  }],
-  "profound_contrast": "what a first-prompt visibility tool would show vs what T4 displacement reveals"
+  "key_finding": "one precise sentence naming the specific competitor(s) winning at T4 and the mechanism — not generic",
+  "t_final_winning_sources": ["specific source types dominant at T4"],
+  "brand_gaps": ["T4 source types where brand is absent"],
+  "platform_analysis": {
+    "chatgpt": {
+      "dit_turn": null_or_number,
+      "t4_winner": "competitor name or brand name or null",
+      "displacement_mechanism": "specific mechanism",
+      "fix_type": "T1_architecture|T2_authority|T3_volume|none",
+      "fix_rationale": "why this specific fix for ChatGPT's training data pattern"
+    },
+    "gemini": {
+      "dit_turn": null_or_number,
+      "t4_winner": "competitor name or brand name or null",
+      "displacement_mechanism": "specific mechanism",
+      "fix_type": "T1_architecture|T2_authority|T3_volume|none",
+      "fix_rationale": "why this specific fix for Gemini's Educational Drift Arc pattern"
+    },
+    "perplexity": {
+      "dit_turn": null_or_number,
+      "t4_winner": "competitor name or brand name or null",
+      "displacement_mechanism": "specific mechanism",
+      "fix_type": "T1_architecture|T2_authority|T3_volume|none",
+      "fix_rationale": "why this specific fix for Perplexity's live retrieval pattern"
+    }
+  },
+  "interventions": [
+    {
+      "priority": 1,
+      "citation_tier": "T1|T2|T3",
+      "dependency": null_or_"Requires completion of intervention N",
+      "action": "specific named action — what content, where, for which platform",
+      "target_type": "source type",
+      "target_publications": ["specific named publications, not generic categories"],
+      "platforms_affected": ["chatgpt", "gemini", "perplexity"],
+      "rationale": "precisely why this closes the T4 gap on the named platforms",
+      "expected_dit_impact": "e.g. DIT delay from T2 to T4 on ChatGPT within 12 weeks",
+      "timeline": "platform-specific realistic timeline"
+    }
+  ],
+  "sequencing_note": "one sentence explaining the T1-T2-T3 dependency chain and why order matters for this brand",
+  "profound_contrast": "what first-prompt visibility tools would show vs what T4 displacement reveals — be specific about the gap without naming competitor products"
 }
 PROMPT;
 
         $payload = json_encode([
             'model'      => 'claude-sonnet-4-20250514',
-            'max_tokens' => 1200,
+            'max_tokens' => 2500,
             'messages'   => [['role' => 'user', 'content' => $prompt]],
         ]);
 
@@ -615,7 +660,7 @@ PROMPT;
                 'x-api-key: ' . $this->claudeApiKey,
                 'anthropic-version: ' . $this->anthropicVersion,
             ],
-            CURLOPT_TIMEOUT => 45,
+            CURLOPT_TIMEOUT => 60,
         ]);
 
         $raw      = curl_exec($ch);
