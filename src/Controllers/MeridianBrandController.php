@@ -311,7 +311,7 @@ class MeridianBrandController
 
         $adVerdicts = $result
             ? json_decode($result->ad_verdicts ?? '[]', true)
-            : $this->buildAdVerdictsFromProbes($probeRuns, $rcsTotal ?? 0, $adVerdict ?? 'do_not_advertise');
+            : $this->buildAdVerdictsFromProbes($probeRuns, $rcsTotal ?? 0, $adVerdict ?? 'do_not_advertise', $brand->name);
 
         $brief = $result ? json_decode($result->citation_brief ?? 'null', true) : null;
 
@@ -380,10 +380,18 @@ class MeridianBrandController
         })->values()->toArray();
     }
 
-    private function buildAdVerdictsFromProbes($probeRuns, int $rcs, string $verdict): array
+    private function buildAdVerdictsFromProbes($probeRuns, int $rcs, string $verdict, string $brandName = ''): array
     {
         $platforms = $probeRuns->pluck('platform')->unique()->values();
         $result    = [];
+
+        // Platform-specific reasoning pattern descriptions
+        $platformContext = [
+            'chatgpt'    => 'GPT-4o uses training data citations. Displacement is structural and requires T1/T2 authority intervention.',
+            'gemini'     => 'Gemini activates Educational Drift Arc — displaces early via clinical/educational framing. Requires brand-specific content density.',
+            'perplexity' => 'Perplexity uses live retrieval. Displacement is volatile and can be addressed faster via T3 content. URLs are captured directly.',
+            'grok'       => 'Grok requires primary criterion ownership. Displacement responds to definitional authority in training data.',
+        ];
 
         foreach ($platforms as $platform) {
             $runs     = $probeRuns->where('platform', $platform);
@@ -391,31 +399,75 @@ class MeridianBrandController
             $generic  = $runs->firstWhere('probe_mode', 'generic');
             if (!$anchored) continue;
 
-            $rc              = json_decode($anchored->raw_config ?? '{}', true);
-            $platformScore   = (int)($rc['probe_score'] ?? 0);
-            $platformVerdict = $platformScore >= 70 ? 'amplification_ready'
-                : ($platformScore >= 40 ? 'monitor' : 'do_not_advertise');
+            $rc            = json_decode($anchored->raw_config ?? '{}', true);
+            $platformScore = (int)($rc['probe_score'] ?? 0);
+
+            // Correctly detect if brand survived at T4
+            // t4_winner = null means no clear recommendation (brand may or may not be present)
+            // t4_winner = brand name means brand WON the T4 position
+            // t4_winner = competitor name means brand was displaced
+            $t4Winner      = $anchored->t4_winner;
+            $brandSurvivedT4 = ($t4Winner === null)
+                || (mb_strtolower(trim($t4Winner)) === mb_strtolower(trim($brandName)))
+                || ($anchored->dit_turn === null); // no DIT = no displacement
+
+            // Generic probe: brand present if t4_winner is null or brand name
+            $genericSurvived = !$generic || ($generic->t4_winner === null)
+                || (mb_strtolower(trim($generic->t4_winner ?? '')) === mb_strtolower(trim($brandName)));
+
+            // Platform verdict based on survival, not just score
+            if ($brandSurvivedT4 && $genericSurvived) {
+                $platformVerdict = $platformScore >= 70 ? 'amplification_ready' : 'monitor';
+            } elseif ($brandSurvivedT4) {
+                $platformVerdict = $platformScore >= 50 ? 'monitor' : 'do_not_advertise';
+            } else {
+                $platformVerdict = $platformScore >= 70 ? 'monitor' : 'do_not_advertise';
+            }
+
+            // DIT assessment
+            $ditTurn   = $anchored->dit_turn ? (int)$anchored->dit_turn : null;
+            $ditAssess = $ditTurn === null ? 'pass'
+                : ($ditTurn <= 2 ? 'fail' : 'warn');
+
+            // Competitor name for rationale
+            $competitor = ($t4Winner && !$brandSurvivedT4) ? $t4Winner : null;
+
+            // Displacement mechanism label
+            $ditType = $rc['dit_type'] ?? null;
+            $mechanismLabel = match($ditType) {
+                'evaluative'  => 'criteria-based evaluation filter',
+                'comparative' => 'competitive comparison displacement',
+                'multi_axis'  => 'multi-axis lifestyle fit filter',
+                default       => 'citation layer displacement',
+            };
 
             $result[] = [
                 'platform'               => $platform,
                 'verdict'                => $platformVerdict,
-                'verdictRationale'       => $anchored->t4_winner
-                    ? "Brand absent at T4. {$anchored->t4_winner} captures the routing."
-                    : 'Brand survives to T4 purchase decision.',
-                'q1ReasoningChain'       => $anchored->dit_turn ? 'fail' : 'pass',
-                'q1Detail'               => $anchored->dit_turn
-                    ? "DIT fires at T{$anchored->dit_turn}." : 'Brand holds primary position.',
-                'q2HandoffCapture'       => $anchored->t4_winner ? 'fail' : 'pass',
-                'q2Detail'               => $anchored->t4_winner
-                    ? "T4 captured by {$anchored->t4_winner}." : 'Brand present at T4.',
-                'q3GenericConsideration' => ($generic && !$generic->t4_winner) ? 'pass' : 'fail',
-                'q3Detail'               => ($generic && !$generic->t4_winner)
-                    ? 'Brand appears in generic probes.' : 'Brand absent from generic probes.',
-                'q4Displacement'         => ($anchored->dit_turn && $anchored->dit_turn <= 2) ? 'fail' : 'warn',
-                'q4Detail'               => $anchored->dit_turn
-                    ? "DIT T{$anchored->dit_turn}." : 'No displacement detected.',
+                'platformContext'        => $platformContext[$platform] ?? '',
+                'verdictRationale'       => $competitor
+                    ? "Brand displaced at T4 by {$competitor} via {$mechanismLabel}. Ad spend would appear in hostile context."
+                    : ($brandSurvivedT4
+                        ? "Brand holds T4 purchase position. Reasoning chain supports commercial handoff."
+                        : "Brand absent at T4. Purchase routing captured by competitor."),
+                'q1ReasoningChain'       => $ditTurn ? ($ditTurn <= 2 ? 'fail' : 'warn') : 'pass',
+                'q1Detail'               => $ditTurn
+                    ? "DIT fires at T{$ditTurn} — brand loses primary citation position via {$mechanismLabel}."
+                    : 'Brand holds primary citation position across all four turns.',
+                'q2HandoffCapture'       => $brandSurvivedT4 ? 'pass' : 'fail',
+                'q2Detail'               => $brandSurvivedT4
+                    ? 'Brand present at T4 commercial handoff. Purchase routing confirmed.'
+                    : ($competitor ? "T4 handoff captured by {$competitor}. Brand absent at purchase decision." : 'Brand absent at T4 commercial handoff.'),
+                'q3GenericConsideration' => $genericSurvived ? 'pass' : 'fail',
+                'q3Detail'               => $genericSurvived
+                    ? 'Brand appears in unprompted category recommendations on this platform.'
+                    : ($generic?->t4_winner ? "Generic probe routes to {$generic->t4_winner} — brand absent from spontaneous recommendations." : 'Brand absent from generic category probes on this platform.'),
+                'q4Displacement'         => $ditAssess,
+                'q4Detail'               => $ditTurn
+                    ? "DIT T{$ditTurn} — " . ($ditTurn <= 2 ? 'early structural displacement. Brand loses position before criteria evaluation.' : 'late-stage displacement at criteria/purchase turn. Brand survives awareness and comparison.')
+                    : 'No displacement detected. Brand holds primary position across all evaluation stages.',
                 'q5Rar'                  => $rcs < 40 ? 'fail' : ($rcs < 70 ? 'warn' : 'pass'),
-                'q5Detail'               => "RCS {$rcs} on {$platform}.",
+                'q5Detail'               => "Platform RCS {$platformScore}/100. " . ($competitor ? "Revenue at risk from {$competitor} capture." : "Brand holds purchase position."),
                 'rcsGapToAmplification'  => max(0, 70 - $platformScore),
                 'recommendedIntervention'=> null,
             ];
