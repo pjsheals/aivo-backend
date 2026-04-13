@@ -46,12 +46,36 @@ class MeridianBrandController
 
             if (!$brand) { http_response_code(404); json_response(['error' => 'Brand not found.']); return; }
 
+            // BJP audit — journey map, RCS, ad verdicts (most recent non-PSOS audit)
             $latestAudit = DB::table('meridian_audits')
-                ->where('brand_id', $id)->where('status', 'completed')
+                ->where('brand_id', $id)
+                ->where('status', 'completed')
+                ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
+                ->orderByDesc('completed_at')->first();
+
+            // PSOS audit — awareness stability (most recent PSOS audit, stored separately)
+            $latestPsosAudit = DB::table('meridian_audits')
+                ->where('brand_id', $id)
+                ->where('status', 'completed')
+                ->where('audit_type', 'psos')
                 ->orderByDesc('completed_at')->first();
 
             $auditData = null;
             if ($latestAudit) $auditData = $this->getAuditDetail((int)$latestAudit->id, $brand);
+
+            // Attach PSOS result to auditData if available
+            if ($latestPsosAudit) {
+                $psosRow = DB::table('meridian_brand_audit_results')
+                    ->where('audit_id', $latestPsosAudit->id)
+                    ->whereNotNull('psos_result')
+                    ->first(['psos_result']);
+                if ($psosRow && $auditData !== null) {
+                    $auditData['psosResult'] = json_decode($psosRow->psos_result, true);
+                } elseif ($psosRow && $auditData === null) {
+                    // PSOS exists but no BJP audit yet — show minimal state
+                    $auditData = ['psosResult' => json_decode($psosRow->psos_result, true)];
+                }
+            }
 
             $auditHistory = DB::table('meridian_audits')
                 ->where('brand_id', $id)->whereIn('status', ['completed', 'failed'])
