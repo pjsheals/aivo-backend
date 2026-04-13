@@ -99,12 +99,34 @@ $probesTotal     = (int)$audit->probes_total;
 $probesCompleted = 0;
 $probesFailed    = 0;
 
-// ── Instantiate engine ────────────────────────────────────────────
+// ── Route to correct engine based on instrument type ─────────────
+$instrumentType = $audit->audit_type ?? 'directed_bjp';
 $engine = new \Aivo\Meridian\MeridianProbeEngine();
 
-// ── Execute probes sequentially ───────────────────────────────────
+// PSOS: runs as a single engine call, not per probe_run
+if ($instrumentType === 'psos') {
+    error_log("[AuditWorker] Running PSOS Baseline");
+    $psosEngine  = new \Aivo\Meridian\MeridianPSOSEngine();
+    $platforms   = json_decode($audit->platforms ?? '[]', true);
+    $psosSuccess = $psosEngine->run($auditId, $platforms, $brand->name, $brand->category ?: 'product');
+
+    DB::table('meridian_audits')->where('id', $auditId)->update([
+        'status'           => $psosSuccess ? 'completed' : 'failed',
+        'probes_completed' => 1,
+        'completed_at'     => now(),
+        'updated_at'       => now(),
+    ]);
+
+    error_log("[AuditWorker] PSOS complete. Success=" . ($psosSuccess ? 'true' : 'false'));
+    exit($psosSuccess ? 0 : 1);
+}
+
+// ── Execute DPA/BJP probes sequentially ───────────────────────────
 foreach ($probeRuns as $run) {
-    error_log("[AuditWorker] Running probe: {$run->platform}/{$run->probe_mode} (run_id={$run->id})");
+    $rc = json_decode($run->raw_config ?? '{}', true);
+    $isUndirected = (bool)($rc['undirected'] ?? false);
+    $probeDesc = $isUndirected ? "Undirected BJP" : "Directed BJP";
+    error_log("[AuditWorker] Running {$probeDesc}: {$run->platform}/{$run->probe_mode} (run_id={$run->id})");
 
     $success = $engine->run((int)$run->id);
 
@@ -115,12 +137,12 @@ foreach ($probeRuns as $run) {
         error_log("[AuditWorker] Probe failed: {$run->platform}/{$run->probe_mode}");
     }
 
-    // Update audit progress after each probe (no percent_complete column)
     DB::table('meridian_audits')->where('id', $auditId)->update([
         'probes_completed' => $probesCompleted,
         'updated_at'       => now(),
     ]);
 
+    $pct = $probesTotal > 0 ? round(($probesCompleted / $probesTotal) * 100) : 0;
     error_log("[AuditWorker] Progress: {$probesCompleted}/{$probesTotal} ({$pct}%)");
 }
 
@@ -158,18 +180,23 @@ $journeyRuns = $completedRuns->map(function ($run) {
         ->orderByDesc('turn_number')
         ->first();
 
-    $finalAnno = $finalTurn ? json_decode($finalTurn->annotation ?? '{}', true) : [];
+    $finalAnno = $finalTurn ? json_decode($finalTurn->citation_urls ?? '{}', true) : [];
+    $rc = json_decode($run->raw_config ?? '{}', true);
+    $isUndirected = (bool)($rc['undirected'] ?? false);
+    $handoffTurn  = (int)$run->turns_completed ?: 4;
 
     return [
         'platform'        => $run->platform,
         'probeMode'       => $run->probe_mode,
+        'instrument'      => $run->instrument ?? ($isUndirected ? 'Undirected BJP' : 'Directed BJP'),
+        'isUndirected'    => $isUndirected,
         'totalTurns'      => (int)$run->turns_completed,
         'ditTurn'         => $run->dit_turn ? (int)$run->dit_turn : null,
-        'ditType'         => $run->dit_type,
+        'ditType'         => $rc['dit_type'] ?? null,
         'displacingBrand' => $run->t4_winner,
-        'handoffTurn'     => 4,
+        'handoffTurn'     => $handoffTurn,
         'brandAtHandoff'  => ($finalTurn && $finalTurn->brand_presence === 'present') ? 'present' : 'absent',
-        'terminationType' => 'turn_limit',
+        'terminationType' => $run->termination_type ?? 'turn_limit',
         'genericResult'   => $run->probe_mode === 'generic'
             ? (($finalTurn && $finalTurn->brand_presence === 'present') ? 'present' : 'absent')
             : null,
