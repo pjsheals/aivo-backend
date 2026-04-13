@@ -115,6 +115,7 @@ $routes = [
         // ── Meridian: Superadmin ───────────────────────────────
         '/api/meridian/admin/login'                  => [MeridianSuperadminController::class, 'login'],
         '/api/meridian/admin/logout'                 => [MeridianSuperadminController::class, 'logout'],
+        '/api/meridian/admin/agencies/create'        => [MeridianSuperadminController::class, 'createAgency'],
         '/api/meridian/admin/agencies/set-plan'      => [MeridianSuperadminController::class, 'setPlan'],
         '/api/meridian/admin/agencies/suspend'       => [MeridianSuperadminController::class, 'suspend'],
         '/api/meridian/admin/agencies/unsuspend'     => [MeridianSuperadminController::class, 'unsuspend'],
