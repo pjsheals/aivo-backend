@@ -442,25 +442,17 @@ class MeridianBrandController
             $rc            = json_decode($anchored->raw_config ?? '{}', true);
             $platformScore = (int)($rc['probe_score'] ?? 0);
             $t4Winner      = $anchored->t4_winner;
-            $brandSurvivedT4 = ($t4Winner === null)
-                || (mb_strtolower(trim($t4Winner)) === mb_strtolower(trim($brandName)))
-                || ($anchored->dit_turn === null);
+            $ditTurn       = $anchored->dit_turn ? (int)$anchored->dit_turn : null;
+            $ditType       = $rc['dit_type'] ?? null;
+
+            $brandWonT4 = $t4Winner !== null
+                && mb_strtolower(trim($t4Winner)) === mb_strtolower(trim($brandName));
+            $competitorWonT4 = $t4Winner !== null && !$brandWonT4;
+            $competitor = $competitorWonT4 ? $t4Winner : null;
 
             $genericSurvived = !$generic || ($generic->t4_winner === null)
                 || (mb_strtolower(trim($generic->t4_winner ?? '')) === mb_strtolower(trim($brandName)));
 
-            if ($brandSurvivedT4 && $genericSurvived) {
-                $platformVerdict = $platformScore >= 70 ? 'amplification_ready' : 'monitor';
-            } elseif ($brandSurvivedT4) {
-                $platformVerdict = $platformScore >= 50 ? 'monitor' : 'do_not_advertise';
-            } else {
-                $platformVerdict = $platformScore >= 70 ? 'monitor' : 'do_not_advertise';
-            }
-
-            $ditTurn   = $anchored->dit_turn ? (int)$anchored->dit_turn : null;
-            $ditAssess = $ditTurn === null ? 'pass' : ($ditTurn <= 2 ? 'fail' : 'warn');
-            $competitor = ($t4Winner && !$brandSurvivedT4) ? $t4Winner : null;
-            $ditType = $rc['dit_type'] ?? null;
             $mechanismLabel = match($ditType) {
                 'evaluative'  => 'criteria-based evaluation filter',
                 'comparative' => 'competitive comparison displacement',
@@ -468,33 +460,89 @@ class MeridianBrandController
                 default       => 'citation layer displacement',
             };
 
+            // ── Three-category verdict logic ──────────────────────────────
+            //
+            // Category 1 — do_not_advertise
+            //   DIT fires at T1 or T2: brand loses the reasoning chain before
+            //   comparison or criteria evaluation. Advertising into a hostile
+            //   context where a competitor preference is already formed.
+            //
+            // Category 2 — advertise_with_caution
+            //   Brand present T1–T3 but loses T4 (DIT T3, or competitor wins T4):
+            //   brand entered consideration but didn't take the purchase recommendation.
+            //   LLM advertising at criteria stage can reinforce presence.
+            //
+            // Category 3 — amplification_ready
+            //   Null DIT (brand held throughout) or brand explicitly won T4:
+            //   brand holds the reasoning chain to purchase. Ad spend converts
+            //   organic recommendation into controlled destination routing.
+
+            if ($ditTurn !== null && $ditTurn <= 2) {
+                // Category 1: Early structural displacement
+                $platformVerdict  = 'do_not_advertise';
+                $verdictRationale = 'Resolve reasoning chain displacement before committing LLM ad budget. '
+                    . 'Sponsored placements appear after the model has already formed a competitor preference'
+                    . ($competitor ? " — {$competitor} holds the reasoning chain on this platform" : '')
+                    . '. Your spend would amplify absence, not presence.';
+
+            } elseif ($ditTurn === null && !$competitorWonT4) {
+                // Category 3: Null DIT — brand held primary throughout
+                $platformVerdict  = 'amplification_ready';
+                $verdictRationale = 'Brand holds the reasoning chain to purchase. '
+                    . 'Advertising here converts organic recommendation into controlled routing — '
+                    . 'deploy LLM ad spend to direct the commercial handoff to your preferred destination.';
+
+            } elseif ($brandWonT4) {
+                // Category 3: Brand explicitly won T4
+                $platformVerdict  = 'amplification_ready';
+                $verdictRationale = 'Brand wins the T4 purchase recommendation on this platform. '
+                    . 'Advertising here converts organic recommendation into controlled routing — '
+                    . 'deploy LLM ad spend to direct the commercial handoff to your preferred destination.';
+
+            } else {
+                // Category 2: Present T1–T3 but loses T4 (DIT T3 or competitor wins)
+                $platformVerdict  = 'advertise_with_caution';
+                $verdictRationale = 'Brand enters the consideration set but loses the purchase decision'
+                    . ($competitor ? " to {$competitor}" : '')
+                    . '. Targeted LLM advertising at the criteria stage could reinforce presence '
+                    . 'and reduce displacement risk — high potential, moderate readiness.';
+            }
+
+            $ditAssess = $ditTurn === null ? 'pass' : ($ditTurn <= 2 ? 'fail' : 'warn');
+
             $result[] = [
                 'platform'               => $platform,
                 'verdict'                => $platformVerdict,
                 'platformContext'        => $platformContext[$platform] ?? '',
-                'verdictRationale'       => $competitor
-                    ? "Brand displaced at T4 by {$competitor} via {$mechanismLabel}. Ad spend would appear in hostile context."
-                    : ($brandSurvivedT4
-                        ? "Brand holds T4 purchase position. Reasoning chain supports commercial handoff."
-                        : "Brand absent at T4. Purchase routing captured by competitor."),
+                'verdictRationale'       => $verdictRationale,
                 'q1ReasoningChain'       => $ditTurn ? ($ditTurn <= 2 ? 'fail' : 'warn') : 'pass',
                 'q1Detail'               => $ditTurn
                     ? "DIT fires at T{$ditTurn} — brand loses primary citation position via {$mechanismLabel}."
                     : 'Brand holds primary citation position across all four turns.',
-                'q2HandoffCapture'       => $brandSurvivedT4 ? 'pass' : 'fail',
-                'q2Detail'               => $brandSurvivedT4
-                    ? 'Brand present at T4 commercial handoff. Purchase routing confirmed.'
-                    : ($competitor ? "T4 handoff captured by {$competitor}. Brand absent at purchase decision." : 'Brand absent at T4 commercial handoff.'),
+                'q2HandoffCapture'       => (!$competitorWonT4 && $ditTurn === null) || $brandWonT4 ? 'pass' : 'fail',
+                'q2Detail'               => $brandWonT4
+                    ? 'Brand wins T4 purchase recommendation. Commercial handoff confirmed.'
+                    : ($ditTurn === null && !$competitorWonT4
+                        ? 'Brand holds primary status to commercial handoff. Purchase routing confirmed.'
+                        : ($competitor
+                            ? "T4 handoff captured by {$competitor}. Brand absent at purchase decision."
+                            : 'Brand absent at T4 commercial handoff.')),
                 'q3GenericConsideration' => $genericSurvived ? 'pass' : 'fail',
                 'q3Detail'               => $genericSurvived
                     ? 'Brand appears in unprompted category recommendations on this platform.'
-                    : ($generic?->t4_winner ? "Generic probe routes to {$generic->t4_winner} — brand absent from spontaneous recommendations." : 'Brand absent from generic category probes on this platform.'),
+                    : ($generic?->t4_winner
+                        ? "Generic probe routes to {$generic->t4_winner} — brand absent from spontaneous recommendations."
+                        : 'Brand absent from generic category probes on this platform.'),
                 'q4Displacement'         => $ditAssess,
                 'q4Detail'               => $ditTurn
-                    ? "DIT T{$ditTurn} — " . ($ditTurn <= 2 ? 'early structural displacement. Brand loses position before criteria evaluation.' : 'late-stage displacement at criteria/purchase turn. Brand survives awareness and comparison.')
+                    ? "DIT T{$ditTurn} — " . ($ditTurn <= 2
+                        ? 'early structural displacement. Brand loses position before criteria evaluation.'
+                        : 'late-stage displacement at criteria/purchase turn. Brand survives awareness and comparison.')
                     : 'No displacement detected. Brand holds primary position across all evaluation stages.',
                 'q5Rar'                  => $rcs < 40 ? 'fail' : ($rcs < 70 ? 'warn' : 'pass'),
-                'q5Detail'               => "Platform RCS {$platformScore}/100. " . ($competitor ? "Revenue at risk from {$competitor} capture." : "Brand holds purchase position."),
+                'q5Detail'               => "Platform RCS {$platformScore}/100. " . ($competitor
+                    ? "Revenue at risk from {$competitor} capture."
+                    : 'Brand holds purchase position.'),
                 'rcsGapToAmplification'  => max(0, 70 - $platformScore),
                 'recommendedIntervention'=> null,
             ];
