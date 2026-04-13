@@ -220,23 +220,54 @@ foreach ($platforms as $platform) {
         : null;
     $genericPass = ($genericT4?->brand_presence ?? 'absent') === 'present';
 
-    $platformScore   = (int)($anchoredRun->probe_score ?? 0);
-    $platformVerdict = $engine->determineVerdict($platformScore);
+    $platformScore = (int)($anchoredRun->probe_score ?? 0);
+    $ditTurn       = $anchoredRun->dit_turn ? (int)$anchoredRun->dit_turn : null;
+    $t4WinnerName  = $anchoredRun->t4_winner ?? null;
+    $brandWonT4    = $t4WinnerName !== null
+        && mb_strtolower(trim($t4WinnerName)) === mb_strtolower(trim($brand->name));
+    $competitorWon = $t4WinnerName !== null && !$brandWonT4;
+    $competitor    = $competitorWon ? $t4WinnerName : null;
+
+    if ($ditTurn !== null && $ditTurn <= 2) {
+        $platformVerdict  = 'do_not_advertise';
+        $verdictRationale = 'Resolve reasoning chain displacement before committing LLM ad budget. '
+            . 'Sponsored placements appear after the model has already formed a competitor preference'
+            . ($competitor ? " — {$competitor} holds the reasoning chain on this platform" : '')
+            . '. Your spend would amplify absence, not presence.';
+    } elseif ($ditTurn === null && !$competitorWon) {
+        $platformVerdict  = 'amplification_ready';
+        $verdictRationale = 'Brand holds the reasoning chain to purchase. '
+            . 'Advertising here converts organic recommendation into controlled routing — '
+            . 'deploy LLM ad spend to direct the commercial handoff to your preferred destination.';
+    } elseif ($brandWonT4) {
+        $platformVerdict  = 'amplification_ready';
+        $verdictRationale = 'Brand wins the T4 purchase recommendation on this platform. '
+            . 'Advertising here converts organic recommendation into controlled routing — '
+            . 'deploy LLM ad spend to direct the commercial handoff to your preferred destination.';
+    } else {
+        $platformVerdict  = 'advertise_with_caution';
+        $verdictRationale = 'Brand enters the consideration set but loses the purchase decision'
+            . ($competitor ? " to {$competitor}" : '')
+            . '. Targeted LLM advertising at the criteria stage could reinforce presence '
+            . 'and reduce displacement risk — high potential, moderate readiness.';
+    }
 
     $adVerdicts[] = [
         'platform'               => $platform,
         'verdict'                => $platformVerdict,
-        'verdictRationale'       => $anchoredRun->t4_winner
-            ? "Brand absent at T4. {$anchoredRun->t4_winner} captures the routing."
-            : ($t4Pass ? 'Brand survives to T4 purchase decision.' : 'Brand absent at T4 purchase decision.'),
+        'verdictRationale'       => $verdictRationale,
         'q1ReasoningChain'       => $t1Pass ? 'pass' : 'fail',
         'q1Detail'               => $t1Pass ? 'Brand cited at T1 awareness baseline.' : 'Brand absent at T1.',
-        'q2HandoffCapture'       => $t4Pass ? 'pass' : 'fail',
-        'q2Detail'               => $t4Pass ? 'Brand present at T4 purchase decision.' : 'Brand absent at T4. Competitor captures routing.',
+        'q2HandoffCapture'       => ($brandWonT4 || ($ditTurn === null && !$competitorWon)) ? 'pass' : 'fail',
+        'q2Detail'               => $brandWonT4
+            ? 'Brand wins T4 purchase recommendation. Commercial handoff confirmed.'
+            : ($ditTurn === null && !$competitorWon
+                ? 'Brand holds primary status to commercial handoff.'
+                : ($competitor ? "T4 handoff captured by {$competitor}." : 'Brand absent at T4 commercial handoff.')),
         'q3GenericConsideration' => $genericPass ? 'pass' : 'fail',
         'q3Detail'               => $genericPass ? 'Brand appears in generic category probes.' : 'Brand absent from generic probes on this platform.',
-        'q4Displacement'         => ($anchoredRun->dit_turn && $anchoredRun->dit_turn <= 2) ? 'fail' : 'warn',
-        'q4Detail'               => $anchoredRun->dit_turn ? "DIT fires at T{$anchoredRun->dit_turn}." : 'No displacement detected.',
+        'q4Displacement'         => $ditTurn === null ? 'pass' : ($ditTurn <= 2 ? 'fail' : 'warn'),
+        'q4Detail'               => $ditTurn ? "DIT fires at T{$ditTurn}." : 'No displacement detected.',
         'q5Rar'                  => $rcs < 40 ? 'fail' : ($rcs < 70 ? 'warn' : 'pass'),
         'q5Detail'               => "RCS {$rcs}. " . ($brand->annual_sales
             ? 'Revenue at risk calculated from annual sales data.'
