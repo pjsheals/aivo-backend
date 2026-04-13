@@ -158,9 +158,15 @@ class MeridianProbeEngine
                     $t4WinnerConfidence = $annotation['t4_winner_confidence'] ?? null;
                 }
 
-                // Compute DIT — first turn brand_citation_survived goes false
-                $brandSurvived = (bool)($annotation['brand_citation_survived'] ?? true);
-                $ditFired      = false;
+                // FIX: annotation null defaults to false (brand absent), not true (brand present).
+                // Previously ?? true meant a silent annotation failure would score every turn as
+                // survived, inflating probe scores to 100 and RCS to 100.
+                if ($annotation === null) {
+                    error_log("[ProbeEngine] annotation null at T{$turnNum} {$platform}/{$mode} — treating brand as absent");
+                }
+                $brandSurvived = (bool)($annotation['brand_citation_survived'] ?? false);
+
+                $ditFired = false;
                 if (!$brandSurvived && $ditTurn === null) {
                     $ditTurn  = $turnNum;
                     $ditFired = true;
@@ -574,10 +580,12 @@ PROMPT;
         return (int)round($rcs);
     }
 
+    // FIX: middle band changed from 'monitor' to 'advertise_with_caution' to match
+    // the three-category verdict system in MeridianBrandController and run_audit.php.
     public function determineVerdict(int $rcs): string
     {
         if ($rcs >= 70) return 'amplification_ready';
-        if ($rcs >= 40) return 'monitor';
+        if ($rcs >= 40) return 'advertise_with_caution';
         return 'do_not_advertise';
     }
 
