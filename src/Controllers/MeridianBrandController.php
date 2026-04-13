@@ -81,15 +81,32 @@ class MeridianBrandController
                 }
             }
 
+            // ── AI Remediation — cached Claude-generated 7-section report ────
+            $remediationAI = null;
+            $remRow = DB::table('meridian_brand_audit_results')
+                ->where('brand_id', $id)
+                ->whereNotNull('remediation_json')
+                ->orderByDesc('created_at')
+                ->first(['remediation_json', 'remediation_generated_at']);
+            if ($remRow) {
+                $remediationAI = json_decode($remRow->remediation_json, true);
+                $remediationAI['_generated_at'] = $remRow->remediation_generated_at;
+            }
+            // ────────────────────────────────────────────────────────────────
+
             $prompts = DB::table('meridian_brand_prompts')
                 ->where('brand_id', $id)->where('is_active', true)->get(['prompt_type', 'prompt_text']);
             $promptMap = [];
             foreach ($prompts as $p) $promptMap[$p->prompt_type] = $p->prompt_text;
 
             json_response([
-                'status' => 'ok', 'brand' => $this->formatBrand($brand),
-                'latestAudit' => $auditData, 'auditHistory' => $auditHistory,
-                'remediationPlan' => $remediationPlan, 'prompts' => $promptMap,
+                'status'          => 'ok',
+                'brand'           => $this->formatBrand($brand),
+                'latestAudit'     => $auditData,
+                'auditHistory'    => $auditHistory,
+                'remediationPlan' => $remediationPlan,
+                'remediationAI'   => $remediationAI,
+                'prompts'         => $promptMap,
             ]);
         } catch (\Throwable $e) {
             log_error('[Meridian] brand.detail error', ['error' => $e->getMessage()]);
@@ -263,10 +280,6 @@ class MeridianBrandController
         ];
     }
 
-    /**
-     * Build audit detail from meridian_brand_audit_results + meridian_probe_runs.
-     * These are the tables the worker writes to.
-     */
     private function getAuditDetail(int $auditId, object $brand): array
     {
         $audit  = DB::table('meridian_audits')->find($auditId);
@@ -315,22 +328,21 @@ class MeridianBrandController
 
         $brief = $result ? json_decode($result->citation_brief ?? 'null', true) : null;
 
-        // ── Full per-turn annotation data for Citation Persistence Map ──
         $probeRunDetails = $this->getProbeRunDetails($probeRuns, $brand->name);
 
         return [
-            'auditId'          => $auditId,
-            'completedAt'      => $audit->completed_at,
-            'auditType'        => $audit->audit_type,
-            'instrumentType'   => $audit->instrument_type ?? 'directed_bjp',
-            'platforms'        => json_decode($audit->platforms ?? '[]', true),
-            'rcs'              => $rcs,
-            'rar'              => $rar,
-            'journeyRuns'      => $journeyRuns ?? [],
-            'adVerdicts'       => $adVerdicts  ?? [],
-            'citationBrief'    => $brief,
-            'probeRunDetails'  => $probeRunDetails,
-            'dpaRuns'          => [],
+            'auditId'         => $auditId,
+            'completedAt'     => $audit->completed_at,
+            'auditType'       => $audit->audit_type,
+            'instrumentType'  => $audit->instrument_type ?? 'directed_bjp',
+            'platforms'       => json_decode($audit->platforms ?? '[]', true),
+            'rcs'             => $rcs,
+            'rar'             => $rar,
+            'journeyRuns'     => $journeyRuns ?? [],
+            'adVerdicts'      => $adVerdicts  ?? [],
+            'citationBrief'   => $brief,
+            'probeRunDetails' => $probeRunDetails,
+            'dpaRuns'         => [],
         ];
     }
 
@@ -390,7 +402,6 @@ class MeridianBrandController
         $platforms = $probeRuns->pluck('platform')->unique()->values();
         $result    = [];
 
-        // Platform-specific reasoning pattern descriptions
         $platformContext = [
             'chatgpt'    => 'GPT-4o uses training data citations. Displacement is structural and requires T1/T2 authority intervention.',
             'gemini'     => 'Gemini activates Educational Drift Arc — displaces early via clinical/educational framing. Requires brand-specific content density.',
@@ -406,21 +417,14 @@ class MeridianBrandController
 
             $rc            = json_decode($anchored->raw_config ?? '{}', true);
             $platformScore = (int)($rc['probe_score'] ?? 0);
-
-            // Correctly detect if brand survived at T4
-            // t4_winner = null means no clear recommendation (brand may or may not be present)
-            // t4_winner = brand name means brand WON the T4 position
-            // t4_winner = competitor name means brand was displaced
             $t4Winner      = $anchored->t4_winner;
             $brandSurvivedT4 = ($t4Winner === null)
                 || (mb_strtolower(trim($t4Winner)) === mb_strtolower(trim($brandName)))
-                || ($anchored->dit_turn === null); // no DIT = no displacement
+                || ($anchored->dit_turn === null);
 
-            // Generic probe: brand present if t4_winner is null or brand name
             $genericSurvived = !$generic || ($generic->t4_winner === null)
                 || (mb_strtolower(trim($generic->t4_winner ?? '')) === mb_strtolower(trim($brandName)));
 
-            // Platform verdict based on survival, not just score
             if ($brandSurvivedT4 && $genericSurvived) {
                 $platformVerdict = $platformScore >= 70 ? 'amplification_ready' : 'monitor';
             } elseif ($brandSurvivedT4) {
@@ -429,15 +433,9 @@ class MeridianBrandController
                 $platformVerdict = $platformScore >= 70 ? 'monitor' : 'do_not_advertise';
             }
 
-            // DIT assessment
             $ditTurn   = $anchored->dit_turn ? (int)$anchored->dit_turn : null;
-            $ditAssess = $ditTurn === null ? 'pass'
-                : ($ditTurn <= 2 ? 'fail' : 'warn');
-
-            // Competitor name for rationale
+            $ditAssess = $ditTurn === null ? 'pass' : ($ditTurn <= 2 ? 'fail' : 'warn');
             $competitor = ($t4Winner && !$brandSurvivedT4) ? $t4Winner : null;
-
-            // Displacement mechanism label
             $ditType = $rc['dit_type'] ?? null;
             $mechanismLabel = match($ditType) {
                 'evaluative'  => 'criteria-based evaluation filter',
@@ -481,17 +479,8 @@ class MeridianBrandController
         return $result;
     }
 
-    /**
-     * Return full per-turn annotation data for the Citation Persistence Map.
-     * Reads from meridian_probe_turns — annotation stored in citation_urls jsonb.
-     */
     private function getProbeRunDetails($probeRuns, string $brandName): array
     {
-        $SOURCE_TYPES = [
-            'reference_authority', 'brand_editorial', 'clinical_science',
-            'community_forum', 'brand_owned', 'retail_commerce', 'general_web'
-        ];
-
         $details = [];
 
         foreach ($probeRuns as $run) {
@@ -505,7 +494,6 @@ class MeridianBrandController
                 $annotation = $citData['annotation'] ?? null;
                 $urls       = $citData['urls'] ?? [];
 
-                // Classify destination for each URL (Perplexity only)
                 $classifiedUrls = array_map(function ($url) use ($brandName) {
                     $host = '';
                     try { $host = parse_url($url, PHP_URL_HOST) ?? ''; } catch (\Throwable $e) {}
@@ -529,21 +517,18 @@ class MeridianBrandController
                 }, $urls);
 
                 return [
-                    'turnNumber'       => (int)$turn->turn_number,
-                    'userPrompt'       => $turn->user_prompt,
-                    'brandPresence'    => $turn->brand_presence,
-                    'isDitTurn'        => (bool)$turn->is_dit_turn,
-                    'isHandoffTurn'    => (bool)$turn->is_handoff_turn,
-                    'isAcceptPhrase'   => (bool)($turn->is_acceptance_phrase ?? false),
-                    'annotation'       => $annotation,
-                    'citationUrls'     => $classifiedUrls,
+                    'turnNumber'     => (int)$turn->turn_number,
+                    'userPrompt'     => $turn->user_prompt,
+                    'brandPresence'  => $turn->brand_presence,
+                    'isDitTurn'      => (bool)$turn->is_dit_turn,
+                    'isHandoffTurn'  => (bool)$turn->is_handoff_turn,
+                    'isAcceptPhrase' => (bool)($turn->is_acceptance_phrase ?? false),
+                    'annotation'     => $annotation,
+                    'citationUrls'   => $classifiedUrls,
                 ];
             })->values()->toArray();
 
-            // Compute T1 source type survival per turn
-            $t1Types = collect($turnsOut[0]['annotation']['source_types'] ?? [])
-                ->pluck('type')->toArray();
-
+            $t1Types = collect($turnsOut[0]['annotation']['source_types'] ?? [])->pluck('type')->toArray();
             $survivalRates = array_map(function ($turn) use ($t1Types) {
                 $turnTypes = collect($turn['annotation']['source_types'] ?? [])->pluck('type')->toArray();
                 $survived  = count(array_intersect($t1Types, $turnTypes));
