@@ -77,21 +77,41 @@ class MeridianProbeEngine
             'updated_at' => now(),
         ]);
 
-        // Build 4-turn prompt sequence
-        $turnPrompts = $this->buildTurnPrompts($mode, $prompts, $brandName, $category);
-        $totalTurns  = 4;
+        // Detect probe type: directed (4 fixed turns) or undirected (variable, acceptance phrases)
+        $isUndirected = ($rawConfig['undirected'] ?? false) === true;
+        $maxTurns     = $isUndirected ? (int)($rawConfig['max_turns'] ?? 8) : 4;
+
+        // Build prompt sequence
+        $turnPrompts = $isUndirected
+            ? null  // Undirected: T1 only, rest are acceptance phrases
+            : $this->buildTurnPrompts($mode, $prompts, $brandName, $category);
+
+        $t1Prompt = $isUndirected
+            ? ($prompts['undirected_t1'] ?? "I've been looking at {$brandName} for my {$category} routine. Can you tell me about it?")
+            : null;
+
+        $totalTurns = $maxTurns;
 
         $messages  = [];
         $turns     = [];
         $ditTurn   = null;
         $t4Winner  = null;
         $t4WinnerConfidence = null;
+        $consecutiveConversionLoops = 0;
 
         try {
             for ($t = 0; $t < $totalTurns; $t++) {
                 $turnNum   = $t + 1;
-                $userMsg   = $turnPrompts[$t];
                 $isFinal   = ($turnNum === $totalTurns);
+
+                // Build user message
+                if ($isUndirected) {
+                    $userMsg = ($t === 0)
+                        ? $t1Prompt
+                        : $this->randomAcceptPhrase();
+                } else {
+                    $userMsg = $turnPrompts[$t];
+                }
 
                 error_log("[ProbeEngine] {$platform}/{$mode} T{$turnNum} — calling model");
                 $messages[] = ['role' => 'user', 'content' => $userMsg];
@@ -146,22 +166,54 @@ class MeridianProbeEngine
                     $ditFired = true;
                 }
 
+                // Detect conversion loop (undirected: purchase/channel stage repeating)
+                if ($isUndirected && $annotation) {
+                    $stage = $annotation['journey_stage'] ?? '';
+                    if (in_array($stage, ['purchase', 'channel'], true)) {
+                        $consecutiveConversionLoops++;
+                    } else {
+                        $consecutiveConversionLoops = 0;
+                    }
+                }
+
+                $isAcceptPhrase = $isUndirected && $t > 0;
+
                 $turns[] = [
-                    'turn_number'      => $turnNum,
-                    'user_prompt'      => $userMsg,
-                    'model_response'   => $responseText,
-                    'citation_urls'    => json_encode([
+                    'turn_number'        => $turnNum,
+                    'user_prompt'        => $userMsg,
+                    'model_response'     => $responseText,
+                    'citation_urls'      => json_encode([
                         'urls'       => $citationUrls,
                         'annotation' => $annotation,
                     ]),
-                    'is_dit_turn'      => $ditFired,
-                    'is_handoff_turn'  => $isFinal,
-                    'brand_presence'   => $brandSurvived ? 'present' : 'absent',
+                    'is_dit_turn'        => $ditFired,
+                    'is_handoff_turn'    => $isFinal,
+                    'is_acceptance_phrase' => $isAcceptPhrase,
+                    'brand_presence'     => $brandSurvived ? 'present' : 'absent',
                     // Internal only — used for scoring, not stored as separate column
-                    '_brand_survived'  => $brandSurvived,
-                    '_annotation'      => $annotation,
-                    '_error'           => null,
+                    '_brand_survived'    => $brandSurvived,
+                    '_annotation'        => $annotation,
+                    '_error'             => null,
                 ];
+
+                // Early termination for undirected probe
+                if ($isUndirected && $annotation) {
+                    $stage  = $annotation['journey_stage'] ?? '';
+                    $signal = $annotation['displacement_signal'] ?? 'none';
+
+                    // Purchase conclusion reached
+                    if ($stage === 'purchase' && $signal === 'complete' && $t >= 3) {
+                        error_log("[ProbeEngine] Undirected early termination: purchase conclusion at T{$turnNum}");
+                        $isFinal = true;
+                        break;
+                    }
+                    // 4 consecutive conversion loops
+                    if ($consecutiveConversionLoops >= 4) {
+                        error_log("[ProbeEngine] Undirected early termination: 4 consecutive conversion loops at T{$turnNum}");
+                        $isFinal = true;
+                        break;
+                    }
+                }
 
                 // Update turns_completed counter
                 DB::table('meridian_probe_runs')->where('id', $probeRunId)->update([
@@ -184,6 +236,7 @@ class MeridianProbeEngine
                     'is_dit_turn'    => $turn['is_dit_turn'],
                     'is_handoff_turn'=> $turn['is_handoff_turn'],
                     'brand_presence' => $turn['brand_presence'],
+                    // is_acceptance_phrase stored in raw annotation jsonb if column exists
                     'created_at'     => now(),
                 ]);
             }
@@ -678,6 +731,17 @@ PROMPT;
     }
 
     // ── HELPERS ──────────────────────────────────────────────────
+    private function randomAcceptPhrase(): string
+    {
+        $phrases = [
+            'Yes please', 'Go ahead', 'Sounds good, tell me more',
+            'Sure, that would be helpful', "Yes, I'd like to know more about that",
+            "I'll go with your recommendation", 'Yes, show me that',
+            'Please continue', 'That sounds interesting, tell me more', 'Yes',
+        ];
+        return $phrases[array_rand($phrases)];
+    }
+
     private function inferDitType(array $annotation): ?string
     {
         $sourceTypes = $annotation['source_types'] ?? [];
