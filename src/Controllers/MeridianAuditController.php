@@ -124,7 +124,7 @@ class MeridianAuditController
                 $probeRunsToCreate[] = [
                     'platform'   => $platform,
                     'probe_mode' => 'anchored',
-                    'instrument' => 'Directed BJP — Anchored',
+                    'instrument' => 'BJP-D Anchored',
                     'undirected' => false,
                     'raw_config' => [
                         'prompts'    => $resolvedPrompts,
@@ -137,7 +137,7 @@ class MeridianAuditController
                 $probeRunsToCreate[] = [
                     'platform'   => $platform,
                     'probe_mode' => 'generic',
-                    'instrument' => 'Directed BJP — Generic',
+                    'instrument' => 'BJP-D Generic',
                     'undirected' => false,
                     'raw_config' => [
                         'prompts'    => $resolvedPrompts,
@@ -158,7 +158,7 @@ class MeridianAuditController
                     $probeRunsToCreate[] = [
                         'platform'   => $platform,
                         'probe_mode' => 'anchored',
-                        'instrument' => 'Undirected BJP — Anchored',
+                        'instrument' => 'BJP-U Anchored',
                         'undirected' => true,
                         'raw_config' => [
                             'prompts'      => $resolvedPrompts,
@@ -176,7 +176,7 @@ class MeridianAuditController
                     $probeRunsToCreate[] = [
                         'platform'   => $platform,
                         'probe_mode' => 'generic',
-                        'instrument' => 'Undirected BJP — Generic',
+                        'instrument' => 'BJP-U Generic',
                         'undirected' => true,
                         'raw_config' => [
                             'prompts'      => $resolvedPrompts,
