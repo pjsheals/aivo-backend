@@ -83,10 +83,18 @@ class MeridianAuditController
             return;
         }
 
+        // ── Resolve instrument type ───────────────────────────────
+        $instrumentType   = trim($body['instrument_type'] ?? $auditType ?? 'directed_bjp');
+        $undirectedConfig = $body['undirected_config'] ?? [];
+        $validInstruments = ['full', 'directed_bjp', 'undirected_bjp', 'psos'];
+        if (!in_array($instrumentType, $validInstruments, true)) {
+            $instrumentType = 'directed_bjp';
+        }
+
         // ── Merge custom prompts over defaults ────────────────────
         $resolvedPrompts = self::DEFAULT_PROMPTS;
         foreach ($prompts as $key => $value) {
-            if (isset($resolvedPrompts[$key]) && !empty(trim((string)$value))) {
+            if (!empty(trim((string)$value))) {
                 $resolvedPrompts[$key] = trim((string)$value);
             }
         }
@@ -102,22 +110,98 @@ class MeridianAuditController
             );
         }
 
-        // ── Probe modes: anchored + generic ───────────────────────
-        $probeModes  = ['anchored', 'generic'];
-        $probesTotal = count($platforms) * count($probeModes);
+        // ── Determine probe runs based on instrument type ─────────
+        // directed_bjp: anchored + generic per platform (4-turn CODA)
+        // undirected_bjp: undirected anchored and/or generic per platform (variable turns)
+        // psos: single PSOS run (no probe_runs needed — engine handles internally)
+        // full: directed_bjp + undirected_bjp across all platforms
+        $probeRunsToCreate = [];
+        $maxTurns = (int)($undirectedConfig['max_turns'] ?? 8);
 
-        // ── Resolve methodology version (NOT NULL column) ────────
+        foreach ($platforms as $platform) {
+            if (in_array($instrumentType, ['directed_bjp', 'full'], true)) {
+                // Directed anchored probe
+                $probeRunsToCreate[] = [
+                    'platform'   => $platform,
+                    'probe_mode' => 'anchored',
+                    'instrument' => 'Directed BJP — Anchored',
+                    'undirected' => false,
+                    'raw_config' => [
+                        'prompts'    => $resolvedPrompts,
+                        'brand_name' => $brandName,
+                        'category'   => $category,
+                        'undirected' => false,
+                    ],
+                ];
+                // Directed generic probe
+                $probeRunsToCreate[] = [
+                    'platform'   => $platform,
+                    'probe_mode' => 'generic',
+                    'instrument' => 'Directed BJP — Generic',
+                    'undirected' => false,
+                    'raw_config' => [
+                        'prompts'    => $resolvedPrompts,
+                        'brand_name' => $brandName,
+                        'category'   => $category,
+                        'undirected' => false,
+                    ],
+                ];
+            }
+
+            if (in_array($instrumentType, ['undirected_bjp', 'full'], true)) {
+                $udirAnchored = (bool)($undirectedConfig['anchored'] ?? true);
+                $udirGeneric  = (bool)($undirectedConfig['generic']  ?? false);
+                $udirT1       = $resolvedPrompts['undirected_t1']
+                    ?? "I've been looking at {$brandName} for my {$category} routine. Can you tell me about it?";
+
+                if ($udirAnchored) {
+                    $probeRunsToCreate[] = [
+                        'platform'   => $platform,
+                        'probe_mode' => 'anchored',
+                        'instrument' => 'Undirected BJP — Anchored',
+                        'undirected' => true,
+                        'raw_config' => [
+                            'prompts'      => $resolvedPrompts,
+                            'undirected_t1'=> $udirT1,
+                            'brand_name'   => $brandName,
+                            'category'     => $category,
+                            'undirected'   => true,
+                            'max_turns'    => $maxTurns,
+                        ],
+                    ];
+                }
+
+                if ($udirGeneric) {
+                    $genericT1 = "I'm looking for a recommendation for a {$category}. What would you suggest?";
+                    $probeRunsToCreate[] = [
+                        'platform'   => $platform,
+                        'probe_mode' => 'generic',
+                        'instrument' => 'Undirected BJP — Generic',
+                        'undirected' => true,
+                        'raw_config' => [
+                            'prompts'      => $resolvedPrompts,
+                            'undirected_t1'=> $genericT1,
+                            'brand_name'   => $brandName,
+                            'category'     => $category,
+                            'undirected'   => true,
+                            'max_turns'    => $maxTurns,
+                        ],
+                    ];
+                }
+            }
+        }
+
+        // PSOS has no individual probe runs — worker handles internally
+        $probesTotal = in_array($instrumentType, ['psos'], true) ? 1 : count($probeRunsToCreate);
+
+        // ── Resolve methodology version ───────────────────────────
         $methodologyVersion = DB::table('meridian_methodology_versions')
-            ->orderBy('id', 'desc')
-            ->first();
+            ->orderBy('id', 'desc')->first();
 
         if (!$methodologyVersion) {
-            // Seed the first version if table is empty
             $methodologyVersionId = DB::table('meridian_methodology_versions')->insertGetId([
-                'name'       => 'AIVO DPA v1',
-                'version'    => '1.0',
-                'created_at' => now(),
-                'updated_at' => now(),
+                'name' => 'AIVO Meridian v1', 'version' => '1.0',
+                'created_at' => now(), 'updated_at' => now(),
             ]);
         } else {
             $methodologyVersionId = $methodologyVersion->id;
@@ -126,12 +210,11 @@ class MeridianAuditController
         try {
             DB::beginTransaction();
 
-            // Create audit record — columns match meridian_audits schema exactly
             $auditId = DB::table('meridian_audits')->insertGetId([
                 'agency_id'              => $auth->agency_id,
                 'client_id'              => $brand->client_id ?? null,
                 'brand_id'               => $brandId,
-                'audit_type'             => $auditType,
+                'audit_type'             => $instrumentType,
                 'status'                 => 'queued',
                 'initiated_by_user_id'   => $auth->user->id,
                 'initiated_by'           => $auth->user->email,
@@ -143,30 +226,21 @@ class MeridianAuditController
                 'updated_at'             => now(),
             ]);
 
-            // Create one probe_run per platform × mode
-            // Prompts stored in raw_config jsonb — no prompts column on audits table
-            foreach ($platforms as $platform) {
-                foreach ($probeModes as $mode) {
-                    $instrument = $mode === 'anchored' ? 'DPA Anchored' : 'DPA Generic';
-                    DB::table('meridian_probe_runs')->insert([
-                        'audit_id'               => $auditId,
-                        'brand_id'               => $brandId,
-                        'agency_id'              => $auth->agency_id,
-                        'methodology_version_id' => $methodologyVersionId,
-                        'instrument'             => $instrument,
-                        'platform'               => $platform,
-                        'probe_mode'             => $mode,
-                        'status'          => 'queued',
-                        'turns_completed' => 0,
-                        'raw_config'      => json_encode([
-                            'prompts'    => $resolvedPrompts,
-                            'brand_name' => $brandName,
-                            'category'   => $category,
-                        ]),
-                        'created_at'      => now(),
-                        'updated_at'      => now(),
-                    ]);
-                }
+            foreach ($probeRunsToCreate as $pr) {
+                DB::table('meridian_probe_runs')->insert([
+                    'audit_id'               => $auditId,
+                    'brand_id'               => $brandId,
+                    'agency_id'              => $auth->agency_id,
+                    'methodology_version_id' => $methodologyVersionId,
+                    'instrument'             => $pr['instrument'],
+                    'platform'               => $pr['platform'],
+                    'probe_mode'             => $pr['probe_mode'],
+                    'status'                 => 'queued',
+                    'turns_completed'        => 0,
+                    'raw_config'             => json_encode($pr['raw_config']),
+                    'created_at'             => now(),
+                    'updated_at'             => now(),
+                ]);
             }
 
             DB::commit();
