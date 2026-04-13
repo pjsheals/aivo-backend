@@ -21,35 +21,19 @@ class MeridianPSOSEngine
     private string $claudeApiKey;
     private string $anthropicVersion = '2023-06-01';
 
-    // 15 prompt clusters spanning awareness to purchase intent
-    // Breadth: does brand appear across different query types?
-    // Depth: how prominently is it recommended?
-    // Resilience: does presence hold under competitive framing?
-    // Sentiment: positive/neutral/negative brand treatment?
-    // Decay: NOT measurable in single run — requires two runs separated by time
-
     private const PROMPT_TEMPLATES = [
-        // Awareness queries (Breadth)
         'awareness_direct'     => "Tell me about {brand} {category}.",
         'awareness_category'   => "What are the best {category_plural} available right now?",
         'awareness_brand_only' => "Is {brand} a good brand?",
-
-        // Consideration queries (Breadth + Depth)
         'consideration_compare'  => "How does {brand} compare to its competitors in {category}?",
         'consideration_worth'    => "Is {brand} worth the money for {category}?",
         'consideration_review'   => "What do experts say about {brand} {product}?",
-
-        // Criteria queries (Resilience)
         'criteria_clinical'    => "What is the best {category} with clinically proven ingredients?",
         'criteria_value'       => "What is the best value {category} that actually works?",
         'criteria_specific'    => "I need a {category} for {use_case}. What would you recommend?",
-
-        // Competitive queries (Resilience)
         'competitive_vs'       => "Which is better: {brand} or {competitor_placeholder}?",
         'competitive_alt'      => "What are the best alternatives to {brand} in {category}?",
         'competitive_category' => "What do most dermatologists recommend for {category}?",
-
-        // Purchase intent queries (Depth + Sentiment)
         'purchase_buy'         => "Where can I buy the best {category}?",
         'purchase_recommend'   => "What {category} would you personally recommend?",
         'purchase_decision'    => "I'm about to buy a {category}. What should I get?",
@@ -62,18 +46,13 @@ class MeridianPSOSEngine
         $this->claudeApiKey = getenv('ANTHROPIC_API_KEY') ?: '';
     }
 
-    /**
-     * Run PSOS Baseline for one brand across specified platforms.
-     * Called by the background worker.
-     */
     public function run(int $auditId, array $platforms, string $brandName, string $category): bool
     {
         error_log("[PSOS] Starting — brand={$brandName} category={$category} platforms=" . implode(',', $platforms));
 
-        // Build the 15 prompts for this brand/category
-        $prompts = $this->buildPrompts($brandName, $category);
+        $prompts    = $this->buildPrompts($brandName, $category);
         $replicates = 2;
-        $results = [];
+        $results    = [];
 
         foreach ($platforms as $platform) {
             $platformResults = [];
@@ -94,7 +73,6 @@ class MeridianPSOSEngine
                         continue;
                     }
 
-                    // Annotate for PSOS dimensions
                     $annotation = $this->annotatePSOS(
                         $modelResult['text'],
                         $brandName,
@@ -103,7 +81,7 @@ class MeridianPSOSEngine
                     );
 
                     $promptScores[] = $annotation;
-                    usleep(300000); // 300ms between calls
+                    usleep(300000);
                 }
 
                 $platformResults[$promptKey] = [
@@ -116,33 +94,48 @@ class MeridianPSOSEngine
             $results[$platform] = $platformResults;
         }
 
-        // Compute dimension scores
         $dimensionScores = $this->computeDimensions($results, $brandName);
+        $psosScore       = $this->computeOverallScore($dimensionScores);
+        $band            = $psosScore >= 70 ? 'Strong' : ($psosScore >= 40 ? 'Moderate' : 'Fragile');
 
-        // Compute overall PSOS score (weighted)
-        $psosScore = $this->computeOverallScore($dimensionScores);
-        $band      = $psosScore >= 70 ? 'Strong' : ($psosScore >= 40 ? 'Moderate' : 'Fragile');
+        $psosData = json_encode([
+            'score'            => $psosScore,
+            'band'             => $band,
+            'dimensions'       => $dimensionScores,
+            'platform_results' => $results,
+            'brand_name'       => $brandName,
+            'category'         => $category,
+            'platforms'        => $platforms,
+            'replicates'       => $replicates,
+            'prompts_run'      => count($prompts),
+            'decay_note'       => 'Decay dimension requires a second PSOS run after 30+ days to measure score movement.',
+            'completed_at'     => now(),
+        ]);
 
-        // Store results
         try {
-            DB::table('meridian_brand_audit_results')
+            // PSOS worker never creates a meridian_brand_audit_results record via the
+            // normal BJP path — must INSERT if none exists, otherwise UPDATE.
+            $existing = DB::table('meridian_brand_audit_results')
                 ->where('audit_id', $auditId)
-                ->update([
-                    'psos_result'  => json_encode([
-                        'score'             => $psosScore,
-                        'band'              => $band,
-                        'dimensions'        => $dimensionScores,
-                        'platform_results'  => $results,
-                        'brand_name'        => $brandName,
-                        'category'          => $category,
-                        'platforms'         => $platforms,
-                        'replicates'        => $replicates,
-                        'prompts_run'       => count($prompts),
-                        'decay_note'        => 'Decay dimension requires a second PSOS run after 30+ days to measure score movement.',
-                        'completed_at'      => now(),
-                    ]),
-                    'updated_at' => now(),
+                ->first(['id']);
+
+            if ($existing) {
+                DB::table('meridian_brand_audit_results')
+                    ->where('audit_id', $auditId)
+                    ->update(['psos_result' => $psosData, 'updated_at' => now()]);
+            } else {
+                $audit = DB::table('meridian_audits')->find($auditId);
+                DB::table('meridian_brand_audit_results')->insert([
+                    'agency_id'   => $audit->agency_id ?? null,
+                    'brand_id'    => $audit->brand_id  ?? null,
+                    'audit_id'    => $auditId,
+                    'psos_result' => $psosData,
+                    'rcs_total'   => null,
+                    'ad_verdict'  => null,
+                    'created_at'  => now(),
+                    'updated_at'  => now(),
                 ]);
+            }
 
             error_log("[PSOS] Complete — score={$psosScore} band={$band}");
             return true;
@@ -156,9 +149,9 @@ class MeridianPSOSEngine
     // ── PROMPT BUILDING ──────────────────────────────────────────
     private function buildPrompts(string $brandName, string $category): array
     {
-        $categoryPlural  = $this->pluralise($category);
-        $product         = $brandName; // Use brand name as product proxy
-        $useCase         = $this->inferUseCase($category);
+        $categoryPlural = $this->pluralise($category);
+        $product        = $brandName;
+        $useCase        = $this->inferUseCase($category);
 
         $prompts = [];
         foreach (self::PROMPT_TEMPLATES as $key => $template) {
@@ -168,23 +161,21 @@ class MeridianPSOSEngine
                 $template
             );
         }
-
         return $prompts;
     }
 
     private function getPromptType(string $key): string
     {
-        if (str_starts_with($key, 'awareness'))    return 'awareness';
+        if (str_starts_with($key, 'awareness'))     return 'awareness';
         if (str_starts_with($key, 'consideration')) return 'consideration';
-        if (str_starts_with($key, 'criteria'))     return 'criteria';
-        if (str_starts_with($key, 'competitive'))  return 'competitive';
-        if (str_starts_with($key, 'purchase'))     return 'purchase';
+        if (str_starts_with($key, 'criteria'))      return 'criteria';
+        if (str_starts_with($key, 'competitive'))   return 'competitive';
+        if (str_starts_with($key, 'purchase'))      return 'purchase';
         return 'general';
     }
 
     private function pluralise(string $category): string
     {
-        // Simple English pluralisation for category names
         if (str_ends_with($category, 's')) return $category;
         if (str_ends_with($category, 'y')) return substr($category, 0, -1) . 'ies';
         return $category . 's';
@@ -241,7 +232,6 @@ class MeridianPSOSEngine
 
         if (!$raw || $httpCode < 200 || $httpCode >= 300) return null;
 
-        // Parse SSE stream
         $text = '';
         foreach (explode("\n", $raw) as $line) {
             $line = trim($line);
@@ -257,12 +247,8 @@ class MeridianPSOSEngine
     }
 
     // ── ANNOTATION ───────────────────────────────────────────────
-    private function annotatePSOS(
-        string $responseText,
-        string $brandName,
-        string $category,
-        string $promptType
-    ): ?array {
+    private function annotatePSOS(string $responseText, string $brandName, string $category, string $promptType): ?array
+    {
         if (!$this->claudeApiKey) return null;
 
         $prompt = <<<PROMPT
@@ -318,26 +304,23 @@ PROMPT;
     // ── DIMENSION SCORING ────────────────────────────────────────
     private function computeDimensions(array $results, string $brandName): array
     {
-        $breadthScores     = [];
-        $depthScores       = [];
-        $resilienceScores  = [];
-        $sentimentScores   = [];
+        $breadthScores    = [];
+        $depthScores      = [];
+        $resilienceScores = [];
+        $sentimentScores  = [];
 
         foreach ($results as $platform => $platformResults) {
             foreach ($platformResults as $promptKey => $promptData) {
                 $type   = $promptData['prompt_type'];
-                $scores = array_filter($promptData['scores']); // Remove nulls
-
+                $scores = array_filter($promptData['scores']);
                 if (empty($scores)) continue;
 
                 foreach ($scores as $score) {
                     if (!$score) continue;
 
-                    // Breadth: was brand mentioned at all?
                     $mentioned = (bool)($score['brand_mentioned'] ?? false);
                     $breadthScores[] = $mentioned ? 100 : 0;
 
-                    // Depth: how prominently?
                     $position = $score['brand_position'] ?? 'absent';
                     $depthScores[] = match($position) {
                         'primary'   => 100,
@@ -346,14 +329,12 @@ PROMPT;
                         default     => 0,
                     };
 
-                    // Resilience: specifically for competitive/criteria prompts
                     if (in_array($type, ['criteria', 'competitive'], true)) {
                         $resilienceScores[] = $mentioned ? (
                             $position === 'primary' ? 100 : ($position === 'secondary' ? 50 : 20)
                         ) : 0;
                     }
 
-                    // Sentiment: positive treatment when mentioned
                     if ($mentioned) {
                         $sentiment = $score['sentiment'] ?? 'neutral';
                         $sentimentScores[] = match($sentiment) {
@@ -381,10 +362,8 @@ PROMPT;
 
     private function computeOverallScore(array $dimensions): int
     {
-        // Weighted: Breadth 25%, Depth 30%, Resilience 30%, Sentiment 15%
-        // Decay excluded from single-run score
-        $weights = ['breadth' => 0.25, 'depth' => 0.30, 'resilience' => 0.30, 'sentiment' => 0.15];
-        $score   = 0;
+        $weights     = ['breadth' => 0.25, 'depth' => 0.30, 'resilience' => 0.30, 'sentiment' => 0.15];
+        $score       = 0;
         $totalWeight = 0;
 
         foreach ($weights as $dim => $weight) {
