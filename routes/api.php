@@ -19,6 +19,7 @@ use Aivo\Controllers\MeridianDashboardController;
 use Aivo\Controllers\MeridianAuditController;
 use Aivo\Controllers\MeridianSuperadminController;
 use Aivo\Controllers\MeridianRemediationController;
+use Aivo\Controllers\MeridianPdfController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -65,8 +66,8 @@ $routes = [
         '/api/meridian/admin/corpus'        => [MeridianSuperadminController::class, 'corpus'],
         '/api/meridian/admin/methodology'   => [MeridianSuperadminController::class, 'methodology'],
 
-        // ── Temporary migration — remove after running once ────────
-        '/api/meridian/migrate/fix-initiated-by' => [MeridianSuperadminController::class, 'migrateInitiatedBy'],
+        // ── Meridian: PDF exports ──────────────────────────────
+        '/api/meridian/pdf/remediation'     => [MeridianPdfController::class, 'remediationReport'],
     ],
 
     'POST' => [
