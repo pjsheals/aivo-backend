@@ -79,9 +79,11 @@ class MeridianRemediationEngine
             ->first();
         if (!$brand) return null;
 
+        // Most recent BJP audit
         $audit = DB::table('meridian_audits')
             ->where('brand_id', $brandId)
             ->where('status', 'completed')
+            ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
             ->orderByDesc('completed_at')
             ->first();
         if (!$audit) return null;
@@ -95,6 +97,27 @@ class MeridianRemediationEngine
             ->where('status', 'completed')
             ->get();
 
+        // ── FIX: Load PSOS from its own separate audit record ─────────────────
+        // PSOS is stored as a separate audit_type='psos' entry, not on the BJP
+        // audit result row. Query it independently, same pattern as brand.detail().
+        $psosResult = null;
+        $psosAudit  = DB::table('meridian_audits')
+            ->where('brand_id', $brandId)
+            ->where('status', 'completed')
+            ->where('audit_type', 'psos')
+            ->orderByDesc('completed_at')
+            ->first();
+        if ($psosAudit) {
+            $psosRow = DB::table('meridian_brand_audit_results')
+                ->where('audit_id', $psosAudit->id)
+                ->whereNotNull('psos_result')
+                ->first(['psos_result']);
+            if ($psosRow) {
+                $psosResult = json_decode($psosRow->psos_result, true);
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         return [
             'brand_id'       => $brandId,
             'brand_name'     => $brand->name,
@@ -104,7 +127,7 @@ class MeridianRemediationEngine
             'revenue_at_risk'=> $result ? (float)($result->revenue_at_risk ?? 0) : 0,
             'journey_runs'   => $result ? json_decode($result->journey_runs ?? '[]', true) : [],
             'citation_brief' => $result ? json_decode($result->citation_brief ?? 'null', true) : null,
-            'psos_result'    => $result ? json_decode($result->psos_result ?? 'null', true) : null,
+            'psos_result'    => $psosResult,
             'probe_runs'     => $this->formatProbeRuns($probeRuns),
         ];
     }
