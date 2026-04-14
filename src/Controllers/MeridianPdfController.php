@@ -112,6 +112,10 @@ class MeridianPdfController
         $verdictLabel = $this->verdictLabel($verdict);
         $verdictColor = $this->verdictColor($verdict);
         $verdictBg    = $this->verdictBg($verdict);
+        $logoUrl      = !empty($agency->logo_url) ? $agency->logo_url : null;
+        $logoHtml     = $logoUrl
+            ? "<img src=\"{$logoUrl}\" style=\"max-height:44px;max-width:160px;margin-bottom:12px;display:block\">"
+            : '';
 
         // Section 1 — Diagnostic Verdict
         $dv         = $data['diagnostic_verdict'] ?? [];
@@ -318,6 +322,7 @@ class MeridianPdfController
 
 <!-- COVER -->
 <div class="cover-bar">
+  {$logoHtml}
   <div class="cover-eyebrow">{$agencyName} &nbsp;·&nbsp; AIVO Meridian Platform</div>
   <div class="cover-title">LLM Ad Readiness Report</div>
   <div class="cover-sub">{$brandName} &nbsp;·&nbsp; {$category}</div>
