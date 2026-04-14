@@ -46,12 +46,22 @@ class MeridianBrandController
 
             if (!$brand) { http_response_code(404); json_response(['error' => 'Brand not found.']); return; }
 
-            // BJP audit — journey map, RCS, ad verdicts (most recent non-PSOS audit)
-            $latestAudit = DB::table('meridian_audits')
-                ->where('brand_id', $id)
-                ->where('status', 'completed')
-                ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
-                ->orderByDesc('completed_at')->first();
+            // BJP audit — journey map, RCS, ad verdicts
+            // If audit_id param provided, load that specific audit; otherwise load latest
+            $requestedAuditId = isset($_GET['audit_id']) ? (int)$_GET['audit_id'] : null;
+
+            $latestAudit = $requestedAuditId
+                ? DB::table('meridian_audits')
+                    ->where('id', $requestedAuditId)
+                    ->where('brand_id', $id)
+                    ->where('status', 'completed')
+                    ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
+                    ->first()
+                : DB::table('meridian_audits')
+                    ->where('brand_id', $id)
+                    ->where('status', 'completed')
+                    ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
+                    ->orderByDesc('completed_at')->first();
 
             // PSOS audit — awareness stability (most recent PSOS audit, stored separately)
             $latestPsosAudit = DB::table('meridian_audits')
@@ -79,8 +89,26 @@ class MeridianBrandController
 
             $auditHistory = DB::table('meridian_audits')
                 ->where('brand_id', $id)->whereIn('status', ['completed', 'failed'])
-                ->orderByDesc('completed_at')->limit(10)
+                ->orderByDesc('completed_at')->limit(20)
                 ->get(['id', 'audit_type', 'status', 'initiated_by', 'started_at', 'completed_at', 'probes_total', 'probes_completed']);
+
+            // Enrich with RCS score for trend chart
+            $auditHistory = $auditHistory->map(function($a) {
+                $result = DB::table('meridian_brand_audit_results')
+                    ->where('audit_id', $a->id)
+                    ->first(['rcs_total']);
+                return [
+                    'id'              => (int)$a->id,
+                    'auditType'       => $a->audit_type,
+                    'status'          => $a->status,
+                    'initiatedBy'     => $a->initiated_by,
+                    'startedAt'       => $a->started_at,
+                    'completedAt'     => $a->completed_at,
+                    'probsTotal'      => (int)$a->probes_total,
+                    'probesCompleted' => (int)$a->probes_completed,
+                    'rcs'             => $result ? (int)$result->rcs_total : null,
+                ];
+            });
 
             $remediationPlan = null;
             if ($latestAudit) {
