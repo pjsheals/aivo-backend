@@ -455,6 +455,19 @@ class MeridianSuperadminController
         }
     }
 
+    // ── TEMPORARY: GET /api/meridian/migrate/add-tam ─────────────
+    // Run once to add TAM column to meridian_brands, then remove.
+    public function migrateTam(): void
+    {
+        try {
+            DB::statement('ALTER TABLE meridian_brands ADD COLUMN IF NOT EXISTS tam NUMERIC(20,2)');
+            json_response(['status' => 'ok', 'message' => 'tam column added to meridian_brands']);
+        } catch (\Throwable $e) {
+            http_response_code(500);
+            json_response(['error' => $e->getMessage()]);
+        }
+    }
+
     // ── Private helpers ──────────────────────────────────────────
     private function requireAdmin(): object
     {
