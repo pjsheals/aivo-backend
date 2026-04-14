@@ -121,6 +121,9 @@ $routes = [
         '/api/meridian/admin/agencies/unsuspend'     => [MeridianSuperadminController::class, 'unsuspend'],
         '/api/meridian/admin/audits/rerun'           => [MeridianSuperadminController::class, 'rerun'],
         '/api/meridian/admin/methodology/publish'    => [MeridianSuperadminController::class, 'publishMethodology'],
+
+        // ── Temporary migration — remove after running once ────────
+        '/api/meridian/migrate/add-tam'              => [MeridianSuperadminController::class, 'migrateTam'],
     ],
 ];
 
