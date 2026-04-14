@@ -13,6 +13,7 @@ use Aivo\Controllers\AdminController;
 
 // ── Meridian controllers ───────────────────────────────────────────
 use Aivo\Controllers\MeridianAuthController;
+use Aivo\Controllers\MeridianAgencyController;
 use Aivo\Controllers\MeridianClientController;
 use Aivo\Controllers\MeridianBrandController;
 use Aivo\Controllers\MeridianDashboardController;
@@ -97,6 +98,9 @@ $routes = [
         '/api/meridian/auth/logout'         => [MeridianAuthController::class,      'logout'],
         '/api/meridian/auth/forgot'         => [MeridianAuthController::class,      'forgot'],
         '/api/meridian/auth/reset'          => [MeridianAuthController::class,      'reset'],
+
+        // ── Meridian: Agency ───────────────────────────────────
+        '/api/meridian/agency/logo'         => [MeridianAgencyController::class,    'updateLogo'],
 
         // ── Meridian: Clients ──────────────────────────────────
         '/api/meridian/clients/create'      => [MeridianClientController::class,    'create'],
