@@ -193,18 +193,10 @@ class MeridianAuditController
 
         $probesTotal = in_array($instrumentType, ['psos'], true) ? 1 : count($probeRunsToCreate);
 
-        // ── Resolve methodology version ───────────────────────────
+        // ── Methodology version — use latest if available, null if not ──
         $methodologyVersion = DB::table('meridian_methodology_versions')
             ->orderBy('id', 'desc')->first();
-
-        if (!$methodologyVersion) {
-            $methodologyVersionId = DB::table('meridian_methodology_versions')->insertGetId([
-                'name' => 'AIVO Meridian v1', 'version' => '1.0',
-                'created_at' => now(), 'updated_at' => now(),
-            ]);
-        } else {
-            $methodologyVersionId = $methodologyVersion->id;
-        }
+        $methodologyVersionId = $methodologyVersion ? $methodologyVersion->id : null;
 
         try {
             DB::beginTransaction();
