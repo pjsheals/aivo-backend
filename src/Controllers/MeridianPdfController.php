@@ -28,8 +28,8 @@ class MeridianPdfController
             return;
         }
 
-        $session = DB::table('meridian_sessions')
-            ->where('token', $token)
+        $session = DB::table('meridian_user_sessions')
+            ->where('session_token', $token)
             ->where('expires_at', '>', now())
             ->first();
 
