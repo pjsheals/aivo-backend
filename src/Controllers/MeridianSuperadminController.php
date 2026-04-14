@@ -455,6 +455,19 @@ class MeridianSuperadminController
         }
     }
 
+    // ── TEMPORARY: GET /api/meridian/migrate/fix-initiated-by ────
+    // Widens initiated_by from VARCHAR(20) to VARCHAR(100). Run once then remove.
+    public function migrateInitiatedBy(): void
+    {
+        try {
+            DB::statement('ALTER TABLE meridian_audits ALTER COLUMN initiated_by TYPE VARCHAR(100)');
+            json_response(['status' => 'ok', 'message' => 'initiated_by column widened to VARCHAR(100)']);
+        } catch (\Throwable $e) {
+            http_response_code(500);
+            json_response(['error' => $e->getMessage()]);
+        }
+    }
+
     // ── Private helpers ──────────────────────────────────────────
     private function requireAdmin(): object
     {
