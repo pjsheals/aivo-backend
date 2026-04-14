@@ -196,6 +196,7 @@ class MeridianBrandController
                 'brand_type' => $brandType, 'annual_sales' => $body['annual_sales'] ?? null,
                 'annual_sales_currency' => trim($body['currency'] ?? 'GBP'), 'market' => trim($body['market'] ?? 'UK'),
                 'website' => trim($body['website'] ?? ''), 'reaudit_cadence_days' => $cadence,
+                'tam' => $body['tam'] ?? null,
                 'is_active' => true, 'created_at' => now(), 'updated_at' => now(),
             ]);
 
@@ -327,6 +328,7 @@ class MeridianBrandController
             'currentDitGrok'      => isset($b->current_dit_grok) ? (int)$b->current_dit_grok : null,
             'currentRar'          => isset($b->current_rar) && $b->current_rar ? (float)$b->current_rar : null,
             'adVerdict'           => $b->current_ad_verdict ?? null,
+            'tam'                 => isset($b->tam) && $b->tam ? (float)$b->tam : null,
             'createdAt'           => $b->created_at,
             'updatedAt'           => $b->updated_at,
         ];
@@ -357,6 +359,7 @@ class MeridianBrandController
         $rar = null;
         if (isset($brand->annual_sales) && $brand->annual_sales && $rcsTotal !== null) {
             $visibilityGap = max(0, 1 - ($rcsTotal / 100));
+            $opportunityGap = 1 - $visibilityGap;
             $rarToday      = (float)$brand->annual_sales * 0.40 * $visibilityGap * 0.15 * 0.40;
             $rar = [
                 'annualSales'    => (float)$brand->annual_sales,
@@ -366,8 +369,17 @@ class MeridianBrandController
                 'rar12mo'        => round($rarToday * 2.0),
                 'discoveryShare' => 0.40,
                 'visibilityGap'  => round($visibilityGap, 2),
+                'opportunityGap' => round($opportunityGap, 2),
                 'llmShareToday'  => 0.15,
             ];
+            // Revenue Opportunity — unlocked when TAM is set
+            if (isset($brand->tam) && $brand->tam) {
+                $ropToday = (float)$brand->tam * 0.40 * $opportunityGap * 0.15 * 0.40;
+                $rar['tam']      = (float)$brand->tam;
+                $rar['ropToday'] = round($ropToday);
+                $rar['rop12mo']  = round($ropToday * 2.0);
+                $rar['marketSharePct'] = round(((float)$brand->annual_sales / (float)$brand->tam) * 100, 1);
+            }
         }
 
         $journeyRuns = $result
