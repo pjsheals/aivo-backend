@@ -125,18 +125,18 @@ class MeridianPdfController
         $sevColor   = in_array($dv['severity'] ?? '', ['critical','high']) ? '#c0393b' : ($dv['severity'] === 'moderate' ? '#b07d30' : '#2d8a6e');
 
         // Section 2 — Platform Displacement
-        $pda        = $data['platform_displacement_analysis'] ?? [];
-        $platHtml   = '';
+        $pda      = $data['platform_displacement_analysis'] ?? [];
+        $platHtml = '';
         foreach (['chatgpt' => 'ChatGPT', 'gemini' => 'Gemini', 'perplexity' => 'Perplexity', 'grok' => 'Grok'] as $key => $label) {
             $p = $pda[$key] ?? null;
             if (!$p || ($p['dit'] ?? '') === 'not_tested') continue;
-            $dit         = strtoupper($p['dit'] ?? '—');
-            $mechanism   = htmlspecialchars($p['mechanism'] ?? '');
-            $diagnosis   = htmlspecialchars($p['diagnosis'] ?? '');
+            $dit          = strtoupper($p['dit'] ?? '—');
+            $mechanism    = htmlspecialchars($p['mechanism'] ?? '');
+            $diagnosis    = htmlspecialchars($p['diagnosis'] ?? '');
             $intervention = htmlspecialchars($p['intervention'] ?? '');
-            $competitors = implode(', ', array_map('htmlspecialchars', $p['displacing_competitors'] ?? []));
-            $ditColor    = in_array($p['dit'] ?? '', ['T1','T2']) ? '#c0393b' : ($p['dit'] === 'null' ? '#2d8a6e' : '#b07d30');
-            $platHtml   .= "
+            $competitors  = implode(', ', array_map('htmlspecialchars', $p['displacing_competitors'] ?? []));
+            $ditColor     = in_array($p['dit'] ?? '', ['T1','T2']) ? '#c0393b' : ($p['dit'] === 'null' ? '#2d8a6e' : '#b07d30');
+            $platHtml    .= "
             <div class='plat-block'>
                 <div class='plat-header'>
                     <span class='plat-name'>{$label}</span>
@@ -153,15 +153,15 @@ class MeridianPdfController
         $cgm     = $data['citation_gap_matrix'] ?? [];
         $cgmHtml = '';
         foreach ($cgm as $gap) {
-            $tier       = htmlspecialchars($gap['tier'] ?? '');
-            $source     = htmlspecialchars($gap['source_category'] ?? '');
-            $status     = strtoupper($gap['current_status'] ?? '');
+            $tier        = htmlspecialchars($gap['tier'] ?? '');
+            $source      = htmlspecialchars($gap['source_category'] ?? '');
+            $status      = strtoupper($gap['current_status'] ?? '');
             $consequence = htmlspecialchars($gap['commercial_consequence'] ?? '');
-            $action     = htmlspecialchars($gap['recommended_action'] ?? '');
-            $priority   = strtoupper($gap['priority'] ?? '');
+            $action      = htmlspecialchars($gap['recommended_action'] ?? '');
+            $priority    = strtoupper($gap['priority'] ?? '');
             $statusColor = $status === 'ABSENT' ? '#c0393b' : ($status === 'WEAK' ? '#b07d30' : '#2d8a6e');
-            $tierColor  = $tier === 'T1' ? '#4a6fa5' : ($tier === 'T2' ? '#2d8a6e' : '#b07d30');
-            $cgmHtml   .= "
+            $tierColor   = $tier === 'T1' ? '#4a6fa5' : ($tier === 'T2' ? '#2d8a6e' : '#b07d30');
+            $cgmHtml    .= "
             <tr>
                 <td><span class='tier-badge' style='background:{$tierColor}'>{$tier}</span></td>
                 <td><strong>{$source}</strong></td>
@@ -173,30 +173,30 @@ class MeridianPdfController
         }
 
         // Section 4 — PSOS
-        $psos       = $data['psos_intervention_priority'] ?? [];
-        $psosBand   = htmlspecialchars($psos['overall_band'] ?? 'Not tested');
-        $psosWeak   = htmlspecialchars($psos['weakest_dimension'] ?? '—');
-        $psosFinding = htmlspecialchars($psos['fragility_finding'] ?? '');
+        $psos         = $data['psos_intervention_priority'] ?? [];
+        $psosBand     = htmlspecialchars($psos['overall_band'] ?? 'Not tested');
+        $psosWeak     = htmlspecialchars($psos['weakest_dimension'] ?? '—');
+        $psosFinding  = htmlspecialchars($psos['fragility_finding'] ?? '');
         $psosIntvHtml = '';
         foreach ($psos['priority_interventions'] ?? [] as $pi) {
-            $dim    = htmlspecialchars($pi['dimension'] ?? '');
-            $intv   = htmlspecialchars($pi['intervention'] ?? '');
-            $rat    = htmlspecialchars($pi['rationale'] ?? '');
-            $psosIntvHtml .= "<div class='psos-item'><strong>{$dim}:</strong> {$intv}<br><span class='rationale'>{$rat}</span></div>";
+            $dim            = htmlspecialchars($pi['dimension'] ?? '');
+            $intv           = htmlspecialchars($pi['intervention'] ?? '');
+            $rat            = htmlspecialchars($pi['rationale'] ?? '');
+            $psosIntvHtml  .= "<div class='psos-item'><strong>{$dim}:</strong> {$intv}<br><span class='rationale'>{$rat}</span></div>";
         }
         $psosBandColor = $psosBand === 'Fragile' ? '#c0393b' : ($psosBand === 'Moderate' ? '#b07d30' : '#2d8a6e');
 
         // Section 5 — Sequenced Programme
         $seqHtml = '';
         foreach ($data['sequenced_programme'] ?? [] as $phase) {
-            $phaseNum  = (int)($phase['phase'] ?? 0);
-            $label     = htmlspecialchars($phase['label'] ?? '');
-            $timeline  = htmlspecialchars($phase['timeline'] ?? '');
-            $focus     = htmlspecialchars($phase['t1_t2_t3_focus'] ?? '');
-            $dep       = htmlspecialchars($phase['dependency'] ?? '');
-            $metric    = htmlspecialchars($phase['expected_metric_change'] ?? '');
-            $actions   = implode('', array_map(fn($a) => '<li>' . htmlspecialchars($a) . '</li>', $phase['actions'] ?? []));
-            $seqHtml  .= "
+            $phaseNum = (int)($phase['phase'] ?? 0);
+            $label    = htmlspecialchars($phase['label'] ?? '');
+            $timeline = htmlspecialchars($phase['timeline'] ?? '');
+            $focus    = htmlspecialchars($phase['t1_t2_t3_focus'] ?? '');
+            $dep      = htmlspecialchars($phase['dependency'] ?? '');
+            $metric   = htmlspecialchars($phase['expected_metric_change'] ?? '');
+            $actions  = implode('', array_map(fn($a) => '<li>' . htmlspecialchars($a) . '</li>', $phase['actions'] ?? []));
+            $seqHtml .= "
             <div class='phase-block'>
                 <div class='phase-header'>
                     <span class='phase-num'>{$phaseNum}</span>
@@ -207,18 +207,22 @@ class MeridianPdfController
                     <span class='focus-tag'>{$focus}</span>
                 </div>
                 <ul class='phase-actions'>{$actions}</ul>
-                " . ($dep ? "<div class='phase-dep'><strong>Enables:</strong> {$dep}</div>" : '') . "
+                " . ($dep    ? "<div class='phase-dep'><strong>Enables:</strong> {$dep}</div>"         : '') . "
                 " . ($metric ? "<div class='phase-metric'><strong>Expected:</strong> {$metric}</div>" : '') . "
             </div>";
         }
 
         // Section 6 — Reaudit Schedule
-        $rs        = $data['reaudit_schedule'] ?? [];
-        $w4        = htmlspecialchars($rs['week_4_checkpoint'] ?? '');
-        $w8        = htmlspecialchars($rs['week_8_checkpoint'] ?? '');
-        $q1        = htmlspecialchars($rs['quarter_1_full_audit'] ?? '');
-        $compMon   = htmlspecialchars($rs['competitive_monitoring_priority'] ?? '');
-        $triggers  = implode('', array_map(fn($t) => '<li>' . htmlspecialchars($t) . '</li>', $rs['early_warning_triggers'] ?? []));
+        $rs       = $data['reaudit_schedule'] ?? [];
+        $w4       = htmlspecialchars($rs['week_4_checkpoint'] ?? '');
+        $w8       = htmlspecialchars($rs['week_8_checkpoint'] ?? '');
+        $q1       = htmlspecialchars($rs['quarter_1_full_audit'] ?? '');
+        $compMon  = htmlspecialchars($rs['competitive_monitoring_priority'] ?? '');
+        $triggers = implode('', array_map(fn($t) => '<li>' . htmlspecialchars($t) . '</li>', $rs['early_warning_triggers'] ?? []));
+
+        // Pre-compute conditional blocks (cannot use concatenation inside heredoc)
+        $triggersHtml = $triggers ? "<div class='reaudit-label' style='margin-bottom:4px'>Early Warning Triggers</div><ul class='triggers'>{$triggers}</ul>" : '';
+        $compMonHtml  = $compMon  ? "<div class='reaudit-item' style='margin-top:10px'><div class='reaudit-label'>Competitive Monitoring</div><div class='reaudit-text'>{$compMon}</div></div>" : '';
 
         return <<<HTML
 <!DOCTYPE html>
@@ -228,7 +232,7 @@ class MeridianPdfController
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: Helvetica, Arial, sans-serif; font-size: 10px; color: #1a2533; background: #fff; line-height: 1.5; }
-  
+
   .cover { padding: 50px 50px 40px; border-bottom: 3px solid #1a2533; margin-bottom: 30px; }
   .cover-agency { font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: #6b8299; margin-bottom: 20px; }
   .cover-title { font-size: 22px; font-weight: 700; color: #1a2533; margin-bottom: 6px; }
@@ -237,21 +241,21 @@ class MeridianPdfController
   .meta-item { }
   .meta-label { font-size: 8px; letter-spacing: .1em; text-transform: uppercase; color: #8aa0b8; margin-bottom: 2px; }
   .meta-value { font-size: 12px; font-weight: 600; color: #1a2533; }
-  
+
   .content { padding: 0 50px 50px; }
-  
+
   .section { margin-bottom: 28px; page-break-inside: avoid; }
   .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #e8ede6; }
   .section-num { width: 22px; height: 22px; background: #1a2533; color: #fff; border-radius: 50%; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .section-title { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #1a2533; }
-  
+
   .verdict-headline { font-size: 13px; font-weight: 600; color: #1a2533; margin-bottom: 8px; line-height: 1.4; }
   .verdict-summary { font-size: 10px; color: #3a5068; margin-bottom: 10px; line-height: 1.6; }
   .verdict-badges { display: flex; gap: 8px; margin-bottom: 8px; }
   .severity-badge { padding: 3px 10px; border-radius: 12px; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .verdict-badge { padding: 3px 10px; border-radius: 12px; font-size: 9px; font-weight: 600; background: #eef3f8; color: #3a5068; }
   .rar-context { font-size: 9px; color: #6b8299; font-style: italic; padding: 8px 12px; background: #f8f4ee; border-left: 3px solid #b07d30; }
-  
+
   .plat-block { margin-bottom: 10px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e4eaf0; border-radius: 4px; page-break-inside: avoid; }
   .plat-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .plat-name { font-size: 11px; font-weight: 700; color: #1a2533; }
@@ -260,18 +264,18 @@ class MeridianPdfController
   .competitors { font-size: 9px; color: #c0393b; margin-bottom: 4px; }
   .diagnosis { font-size: 9px; color: #3a5068; margin-bottom: 4px; line-height: 1.5; }
   .intervention { font-size: 9px; color: #2d8a6e; padding: 4px 8px; background: rgba(45,138,110,.06); border-radius: 3px; }
-  
+
   .cgm-table { width: 100%; border-collapse: collapse; font-size: 9px; }
   .cgm-table th { background: #f0f4f8; padding: 6px 8px; text-align: left; font-size: 8px; letter-spacing: .06em; text-transform: uppercase; color: #6b8299; font-weight: 600; border-bottom: 1px solid #dce4ec; }
   .cgm-table td { padding: 7px 8px; border-bottom: 1px solid #eef2f6; vertical-align: top; }
   .tier-badge { color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 8px; font-weight: 700; }
   .priority-tag { font-size: 8px; font-weight: 600; color: #6b8299; }
-  
+
   .psos-band { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 700; margin-bottom: 8px; }
   .psos-finding { font-size: 9px; color: #3a5068; margin-bottom: 10px; line-height: 1.6; padding: 8px 12px; background: #f8fafc; border-radius: 4px; }
   .psos-item { margin-bottom: 8px; font-size: 9px; padding: 6px 10px; background: #f8f4ee; border-radius: 3px; line-height: 1.5; }
   .rationale { color: #6b8299; font-style: italic; }
-  
+
   .phase-block { margin-bottom: 10px; padding: 10px 12px; border: 1px solid #e4eaf0; border-radius: 4px; page-break-inside: avoid; }
   .phase-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
   .phase-num { width: 24px; height: 24px; background: #1a2533; color: #fff; border-radius: 50%; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -282,16 +286,16 @@ class MeridianPdfController
   .phase-actions li { margin-bottom: 3px; line-height: 1.5; }
   .phase-dep { font-size: 9px; color: #2d8a6e; margin-left: 34px; margin-bottom: 3px; }
   .phase-metric { font-size: 9px; color: #b07d30; margin-left: 34px; }
-  
+
   .reaudit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
   .reaudit-item { padding: 8px 10px; background: #f8fafc; border: 1px solid #e4eaf0; border-radius: 4px; }
   .reaudit-label { font-size: 8px; letter-spacing: .08em; text-transform: uppercase; color: #8aa0b8; font-weight: 600; margin-bottom: 4px; }
   .reaudit-text { font-size: 9px; color: #3a5068; line-height: 1.5; }
   .triggers { font-size: 9px; color: #c0393b; padding-left: 14px; }
   .triggers li { margin-bottom: 3px; }
-  
+
   .footer { margin-top: 30px; padding: 15px 50px; border-top: 1px solid #e4eaf0; display: flex; justify-content: space-between; font-size: 8px; color: #8aa0b8; }
-  
+
   @page { margin: 15mm 0; }
 </style>
 </head>
@@ -394,8 +398,8 @@ class MeridianPdfController
         <div class="reaudit-text">{$q1}</div>
       </div>
     </div>
-    " . ($triggers ? "<div class='reaudit-label' style='margin-bottom:4px'>Early Warning Triggers</div><ul class='triggers'>{$triggers}</ul>" : '') . "
-    " . ($compMon ? "<div class='reaudit-item' style='margin-top:10px'><div class='reaudit-label'>Competitive Monitoring</div><div class='reaudit-text'>{$compMon}</div></div>" : '') . "
+    {$triggersHtml}
+    {$compMonHtml}
   </div>
 
 </div>
@@ -413,21 +417,21 @@ HTML;
     private function verdictLabel(?string $verdict): string
     {
         return match($verdict) {
-            'amplification_ready'  => 'Amplification Ready',
+            'amplification_ready'    => 'Amplification Ready',
             'advertise_with_caution' => 'Advertise with Caution',
-            'do_not_advertise'     => 'Resolve Displacement First',
-            'monitor'              => 'Monitor Closely',
-            default                => $verdict ?? '—',
+            'do_not_advertise'       => 'Resolve Displacement First',
+            'monitor'                => 'Monitor Closely',
+            default                  => $verdict ?? '—',
         };
     }
 
     private function verdictColor(?string $verdict): string
     {
         return match($verdict) {
-            'amplification_ready'  => '#2d8a6e',
+            'amplification_ready'    => '#2d8a6e',
             'advertise_with_caution' => '#b07d30',
-            'do_not_advertise'     => '#c0393b',
-            default                => '#4a6b8a',
+            'do_not_advertise'       => '#c0393b',
+            default                  => '#4a6b8a',
         };
     }
 }
