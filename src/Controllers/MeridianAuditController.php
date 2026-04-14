@@ -43,6 +43,12 @@ class MeridianAuditController
         $platforms = isset($body['platforms'])   ? (array)$body['platforms'] : self::PLATFORMS;
         $prompts   = isset($body['prompts'])     ? (array)$body['prompts']   : [];
 
+        // ── FIX: Store user-supplied audit label in initiated_by ──
+        // Falls back to 'manual' if no label provided
+        $auditLabel = isset($body['audit_label']) && trim($body['audit_label']) !== ''
+            ? trim($body['audit_label'])
+            : 'manual';
+
         // ── Validate brand belongs to this agency ─────────────────
         if (!$brandId) {
             http_response_code(422);
@@ -111,16 +117,11 @@ class MeridianAuditController
         }
 
         // ── Determine probe runs based on instrument type ─────────
-        // directed_bjp: anchored + generic per platform (4-turn CODA)
-        // undirected_bjp: undirected anchored and/or generic per platform (variable turns)
-        // psos: single PSOS run (no probe_runs needed — engine handles internally)
-        // full: directed_bjp + undirected_bjp across all platforms
         $probeRunsToCreate = [];
         $maxTurns = (int)($undirectedConfig['max_turns'] ?? 8);
 
         foreach ($platforms as $platform) {
             if (in_array($instrumentType, ['directed_bjp', 'full'], true)) {
-                // Directed anchored probe
                 $probeRunsToCreate[] = [
                     'platform'   => $platform,
                     'probe_mode' => 'anchored',
@@ -133,7 +134,6 @@ class MeridianAuditController
                         'undirected' => false,
                     ],
                 ];
-                // Directed generic probe
                 $probeRunsToCreate[] = [
                     'platform'   => $platform,
                     'probe_mode' => 'generic',
@@ -161,12 +161,12 @@ class MeridianAuditController
                         'instrument' => 'BJP-U Anchored',
                         'undirected' => true,
                         'raw_config' => [
-                            'prompts'      => $resolvedPrompts,
-                            'undirected_t1'=> $udirT1,
-                            'brand_name'   => $brandName,
-                            'category'     => $category,
-                            'undirected'   => true,
-                            'max_turns'    => $maxTurns,
+                            'prompts'       => $resolvedPrompts,
+                            'undirected_t1' => $udirT1,
+                            'brand_name'    => $brandName,
+                            'category'      => $category,
+                            'undirected'    => true,
+                            'max_turns'     => $maxTurns,
                         ],
                     ];
                 }
@@ -179,19 +179,18 @@ class MeridianAuditController
                         'instrument' => 'BJP-U Generic',
                         'undirected' => true,
                         'raw_config' => [
-                            'prompts'      => $resolvedPrompts,
-                            'undirected_t1'=> $genericT1,
-                            'brand_name'   => $brandName,
-                            'category'     => $category,
-                            'undirected'   => true,
-                            'max_turns'    => $maxTurns,
+                            'prompts'       => $resolvedPrompts,
+                            'undirected_t1' => $genericT1,
+                            'brand_name'    => $brandName,
+                            'category'      => $category,
+                            'undirected'    => true,
+                            'max_turns'     => $maxTurns,
                         ],
                     ];
                 }
             }
         }
 
-        // PSOS has no individual probe runs — worker handles internally
         $probesTotal = in_array($instrumentType, ['psos'], true) ? 1 : count($probeRunsToCreate);
 
         // ── Resolve methodology version ───────────────────────────
@@ -217,7 +216,7 @@ class MeridianAuditController
                 'audit_type'             => $instrumentType,
                 'status'                 => 'queued',
                 'initiated_by_user_id'   => $auth->user_id,
-                'initiated_by'           => 'manual',
+                'initiated_by'           => $auditLabel,  // ← stores user label or 'manual'
                 'methodology_version_id' => $methodologyVersionId,
                 'platforms'              => json_encode($platforms),
                 'probes_total'           => $probesTotal,
@@ -254,7 +253,6 @@ class MeridianAuditController
         }
 
         // ── Fire background worker ────────────────────────────────
-        // PHP_BINARY gives path to current PHP executable — safe on Railway
         $workerScript = realpath(__DIR__ . '/../../workers/run_audit.php');
         if ($workerScript && file_exists($workerScript)) {
             $cmd = PHP_BINARY . ' ' . escapeshellarg($workerScript)
@@ -308,7 +306,7 @@ class MeridianAuditController
                 'id'             => (int)$run->id,
                 'platform'       => $run->platform,
                 'probeMode'      => $run->probe_mode,
-                'instrument'     => $run->probe_mode === 'anchored' ? 'DPA Anchored' : 'DPA Generic',
+                'instrument'     => $run->instrument ?? ($run->probe_mode === 'anchored' ? 'DPA Anchored' : 'DPA Generic'),
                 'status'         => $run->status,
                 'turnsCompleted' => (int)$run->turns_completed,
                 'ditTurn'        => $run->dit_turn ? (int)$run->dit_turn : null,
@@ -349,10 +347,10 @@ class MeridianAuditController
                 'meridian_audits.brand_id',
                 'meridian_audits.status',
                 'meridian_audits.audit_type',
+                'meridian_audits.initiated_by',
                 'meridian_audits.platforms',
                 'meridian_audits.probes_total',
                 'meridian_audits.probes_completed',
-                'meridian_audits.percent_complete',
                 'meridian_audits.started_at',
                 'meridian_audits.completed_at',
                 'meridian_audits.created_at',
@@ -375,10 +373,10 @@ class MeridianAuditController
                     'brandName'       => $a->brand_name,
                     'status'          => $a->status,
                     'auditType'       => $a->audit_type,
+                    'initiatedBy'     => $a->initiated_by,
                     'platforms'       => json_decode($a->platforms ?? '[]', true),
                     'probesTotal'     => (int)$a->probes_total,
                     'probesCompleted' => (int)$a->probes_completed,
-                    'percentComplete' => (int)$a->percent_complete,
                     'startedAt'       => $a->started_at,
                     'completedAt'     => $a->completed_at,
                     'createdAt'       => $a->created_at,
@@ -388,8 +386,6 @@ class MeridianAuditController
     }
 
     // ── POST /api/meridian/audits/complete ───────────────────────
-    // Called internally by the worker when all probes finish.
-    // Validates using MERIDIAN_INTERNAL_SECRET header.
     public function complete(): void
     {
         $secret = $_SERVER['HTTP_X_MERIDIAN_SECRET'] ?? '';
@@ -408,8 +404,6 @@ class MeridianAuditController
             return;
         }
 
-        // The worker handles most of the DB updates itself.
-        // This endpoint exists for any post-completion hooks needed in future.
         json_response(['status' => 'ok']);
     }
 }
