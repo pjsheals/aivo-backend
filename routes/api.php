@@ -64,6 +64,9 @@ $routes = [
         '/api/meridian/admin/audits'        => [MeridianSuperadminController::class, 'audits'],
         '/api/meridian/admin/corpus'        => [MeridianSuperadminController::class, 'corpus'],
         '/api/meridian/admin/methodology'   => [MeridianSuperadminController::class, 'methodology'],
+
+        // ── Temporary migration — remove after running once ────────
+        '/api/meridian/migrate/fix-initiated-by' => [MeridianSuperadminController::class, 'migrateInitiatedBy'],
     ],
 
     'POST' => [
