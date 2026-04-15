@@ -21,6 +21,7 @@ use Aivo\Controllers\MeridianAuditController;
 use Aivo\Controllers\MeridianSuperadminController;
 use Aivo\Controllers\MeridianRemediationController;
 use Aivo\Controllers\MeridianPdfController;
+use Aivo\Controllers\MeridianClassifierController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -66,10 +67,13 @@ $routes = [
         '/api/meridian/admin/audits'        => [MeridianSuperadminController::class, 'audits'],
         '/api/meridian/admin/corpus'        => [MeridianSuperadminController::class, 'corpus'],
         '/api/meridian/admin/methodology'   => [MeridianSuperadminController::class, 'methodology'],
-        '/api/meridian/admin/model-watch'    => [MeridianSuperadminController::class, 'modelWatch'],
+        '/api/meridian/admin/model-watch'   => [MeridianSuperadminController::class, 'modelWatch'],
 
         // ── Meridian: PDF exports ──────────────────────────────
         '/api/meridian/pdf/remediation'     => [MeridianPdfController::class, 'remediationReport'],
+
+        // ── Meridian: Filter Classifier ────────────────────────
+        '/api/meridian/classify'            => [MeridianClassifierController::class, 'getClassifications'],
     ],
 
     'POST' => [
@@ -130,8 +134,12 @@ $routes = [
         '/api/meridian/admin/agencies/unsuspend'     => [MeridianSuperadminController::class, 'unsuspend'],
         '/api/meridian/admin/audits/rerun'           => [MeridianSuperadminController::class, 'rerun'],
         '/api/meridian/admin/methodology/publish'    => [MeridianSuperadminController::class, 'publishMethodology'],
-        '/api/meridian/admin/alerts/acknowledge' => [MeridianSuperadminController::class, 'acknowledgeAlert'],
-        '/api/meridian/admin/model-watch/run'    => [MeridianSuperadminController::class, 'runModelWatch'],
+        '/api/meridian/admin/alerts/acknowledge'     => [MeridianSuperadminController::class, 'acknowledgeAlert'],
+        '/api/meridian/admin/model-watch/run'        => [MeridianSuperadminController::class, 'runModelWatch'],
+
+        // ── Meridian: Filter Classifier ────────────────────────
+        '/api/meridian/classify'            => [MeridianClassifierController::class, 'classify'],
+        '/api/meridian/classify/all'        => [MeridianClassifierController::class, 'classifyAll'],
     ],
 ];
 
