@@ -22,6 +22,7 @@ use Aivo\Controllers\MeridianSuperadminController;
 use Aivo\Controllers\MeridianRemediationController;
 use Aivo\Controllers\MeridianPdfController;
 use Aivo\Controllers\MeridianClassifierController;
+use Aivo\Controllers\MeridianBrandContextController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -74,6 +75,10 @@ $routes = [
 
         // ── Meridian: Filter Classifier ────────────────────────
         '/api/meridian/classify'            => [MeridianClassifierController::class, 'getClassifications'],
+
+        // ── Meridian: Brand Context ────────────────────────────
+        '/api/meridian/brand-context'       => [MeridianBrandContextController::class, 'list'],
+        '/api/meridian/brand-context/download' => [MeridianBrandContextController::class, 'download'],
     ],
 
     'POST' => [
@@ -140,6 +145,9 @@ $routes = [
         // ── Meridian: Filter Classifier ────────────────────────
         '/api/meridian/classify'            => [MeridianClassifierController::class, 'classify'],
         '/api/meridian/classify/all'        => [MeridianClassifierController::class, 'classifyAll'],
+
+        // ── Meridian: Brand Context ────────────────────────────
+        '/api/meridian/brand-context/generate' => [MeridianBrandContextController::class, 'generate'],
     ],
 ];
 
