@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Meridian;
+namespace Aivo\Meridian;
 
 use PDO;
 
