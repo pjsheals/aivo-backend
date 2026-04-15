@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aivo\Controllers;
 
 use Illuminate\Database\Capsule\Manager as DB;
+use Aivo\Meridian\MeridianCorpusAnalyser;
 
 /**
  * MeridianSuperadminController
@@ -604,6 +605,119 @@ class MeridianSuperadminController
             log_error('[Meridian Admin] methodology/publish error', ['error' => $e->getMessage()]);
             http_response_code(500);
             json_response(['error' => 'Server error.']);
+        }
+    }
+
+
+    // ── GET /api/meridian/admin/model-watch ──────────────────────
+    // Returns platform status, recent alerts, and runs daily
+    // analysis lazily (once per day max).
+    public function modelWatch(): void
+    {
+        $this->requireAdmin();
+
+        try {
+            $analyser = new \Aivo\Meridian\MeridianCorpusAnalyser();
+
+            // Run analysis if we haven't snapshotted today yet
+            $today         = date('Y-m-d');
+            $snapshotToday = DB::table('meridian_corpus_snapshots')
+                ->where('snapshot_date', $today)
+                ->exists();
+
+            $analysisResult = null;
+            if (!$snapshotToday) {
+                $analysisResult = $analyser->runDailyAnalysis();
+            }
+
+            $alerts         = $analyser->getAlerts(50);
+            $platformStatus = $analyser->getPlatformStatus();
+
+            $unackCount = DB::table('meridian_model_behaviour_alerts')
+                ->where('acknowledged', false)
+                ->count();
+
+            json_response([
+                'status'          => 'ok',
+                'unacknowledged'  => (int)$unackCount,
+                'platform_status' => array_values($platformStatus),
+                'alerts'          => $alerts,
+                'analysis_ran'    => $analysisResult !== null,
+                'new_alerts'      => $analysisResult['alerts_fired'] ?? 0,
+                'last_checked'    => $today,
+            ]);
+
+        } catch (\Throwable $e) {
+            log_error('[Meridian Admin] model-watch error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error: ' . $e->getMessage()]);
+        }
+    }
+
+    // ── POST /api/meridian/admin/alerts/acknowledge ──────────────
+    public function acknowledgeAlert(): void
+    {
+        $admin    = $this->requireAdmin();
+        $body     = request_body();
+        $alertId  = (int)($body['alert_id'] ?? 0);
+
+        if (!$alertId) {
+            http_response_code(422);
+            json_response(['error' => 'alert_id required.']);
+            return;
+        }
+
+        try {
+            $updated = DB::table('meridian_model_behaviour_alerts')
+                ->where('id', $alertId)
+                ->where('acknowledged', false)
+                ->update([
+                    'acknowledged'    => true,
+                    'acknowledged_at' => now(),
+                    'acknowledged_by' => $admin->admin_email,
+                ]);
+
+            if (!$updated) {
+                http_response_code(404);
+                json_response(['error' => 'Alert not found or already acknowledged.']);
+                return;
+            }
+
+            json_response(['status' => 'ok', 'alert_id' => $alertId]);
+
+        } catch (\Throwable $e) {
+            log_error('[Meridian Admin] acknowledge alert error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error.']);
+        }
+    }
+
+    // ── POST /api/meridian/admin/model-watch/run ─────────────────
+    // Force a manual analysis run (ignores today's snapshot cache)
+    public function runModelWatch(): void
+    {
+        $this->requireAdmin();
+
+        try {
+            $analyser = new \Aivo\Meridian\MeridianCorpusAnalyser();
+
+            // Force re-snapshot by deleting today's entries first
+            $today = date('Y-m-d');
+            DB::table('meridian_corpus_snapshots')->where('snapshot_date', $today)->delete();
+
+            $result = $analyser->runDailyAnalysis();
+
+            json_response([
+                'status'       => 'ok',
+                'alerts_fired' => $result['alerts_fired'],
+                'new_alerts'   => $result['new_alerts'],
+                'ran_at'       => now(),
+            ]);
+
+        } catch (\Throwable $e) {
+            log_error('[Meridian Admin] run model-watch error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error: ' . $e->getMessage()]);
         }
     }
 
