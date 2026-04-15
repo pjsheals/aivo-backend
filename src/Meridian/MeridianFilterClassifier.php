@@ -110,33 +110,43 @@ class MeridianFilterClassifier
 
     private function getTranscript(array $probeRun): ?string
     {
-        // TODO: confirm transcript location with Paul / Sandip.
-        // Current assumption: stored as JSON in raw_config->transcript
-        // as an array of turn objects: [{turn: 1, prompt: "...", response: "..."}, ...]
+        // Reads turn-by-turn transcript from meridian_probe_turns
+        // joined via probe_run_id, ordered by turn_number
+        $stmt = $this->db->prepare(
+            "SELECT turn_number, user_prompt, model_response,
+                    is_dit_turn, is_handoff_turn, brand_presence, citation_urls
+             FROM meridian_probe_turns
+             WHERE probe_run_id = :probe_run_id
+             ORDER BY turn_number ASC"
+        );
+        $stmt->execute([':probe_run_id' => $probeRun['id']]);
+        $turns = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
-        $rawConfig = $probeRun['raw_config'];
-        if (!$rawConfig) return null;
+        if (empty($turns)) return null;
 
-        $config = is_string($rawConfig) ? json_decode($rawConfig, true) : $rawConfig;
-
-        if (!empty($config['transcript'])) {
-            $turns = $config['transcript'];
-            $text = '';
-            foreach ($turns as $turn) {
-                $t = $turn['turn'] ?? '?';
-                $text .= "=== TURN {$t} ===\n";
-                $text .= "PROMPT: " . ($turn['prompt'] ?? '') . "\n";
-                $text .= "RESPONSE: " . ($turn['response'] ?? '') . "\n\n";
+        $text = '';
+        foreach ($turns as $turn) {
+            $t         = $turn['turn_number'];
+            $isDit     = $turn['is_dit_turn']    ? ' [DIT TURN]'     : '';
+            $isHandoff = $turn['is_handoff_turn'] ? ' [HANDOFF TURN]' : '';
+            $presence  = $turn['brand_presence']  ? ' [Brand: ' . $turn['brand_presence'] . ']' : '';
+            $citations = '';
+            if (!empty($turn['citation_urls'])) {
+                $urls = is_string($turn['citation_urls'])
+                    ? json_decode($turn['citation_urls'], true)
+                    : $turn['citation_urls'];
+                if (!empty($urls)) {
+                    $citations = "\nCITATIONS: " . implode(', ', array_slice($urls, 0, 5));
+                }
             }
-            return trim($text);
+
+            $text .= "=== TURN {$t}{$isDit}{$isHandoff}{$presence} ===\n";
+            $text .= "PROMPT: " . ($turn['user_prompt'] ?? '') . "\n";
+            $text .= "RESPONSE: " . ($turn['model_response'] ?? '');
+            $text .= $citations . "\n\n";
         }
 
-        // Fallback: if raw_config itself is a flat transcript string
-        if (isset($config['raw_transcript'])) {
-            return $config['raw_transcript'];
-        }
-
-        return null;
+        return trim($text);
     }
 
     // -------------------------------------------------------------------------
