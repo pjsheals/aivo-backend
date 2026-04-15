@@ -66,6 +66,7 @@ $routes = [
         '/api/meridian/admin/audits'        => [MeridianSuperadminController::class, 'audits'],
         '/api/meridian/admin/corpus'        => [MeridianSuperadminController::class, 'corpus'],
         '/api/meridian/admin/methodology'   => [MeridianSuperadminController::class, 'methodology'],
+        '/api/meridian/admin/model-watch'    => [MeridianSuperadminController::class, 'modelWatch'],
 
         // ── Meridian: PDF exports ──────────────────────────────
         '/api/meridian/pdf/remediation'     => [MeridianPdfController::class, 'remediationReport'],
@@ -129,6 +130,8 @@ $routes = [
         '/api/meridian/admin/agencies/unsuspend'     => [MeridianSuperadminController::class, 'unsuspend'],
         '/api/meridian/admin/audits/rerun'           => [MeridianSuperadminController::class, 'rerun'],
         '/api/meridian/admin/methodology/publish'    => [MeridianSuperadminController::class, 'publishMethodology'],
+        '/api/meridian/admin/alerts/acknowledge' => [MeridianSuperadminController::class, 'acknowledgeAlert'],
+        '/api/meridian/admin/model-watch/run'    => [MeridianSuperadminController::class, 'runModelWatch'],
     ],
 ];
 
