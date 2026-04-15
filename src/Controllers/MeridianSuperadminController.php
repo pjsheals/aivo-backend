@@ -119,7 +119,6 @@ class MeridianSuperadminController
             return;
         }
 
-        // Check email not already in use
         $existing = DB::table('meridian_agency_users')
             ->where('email', $userEmail)->whereNull('deleted_at')->first();
         if ($existing) {
@@ -134,10 +133,7 @@ class MeridianSuperadminController
         try {
             DB::beginTransaction();
 
-            // Get plan limits
             $plan = DB::table('meridian_pricing_plans')->where('plan_type', $planType)->first();
-
-            // Generate unique slug
             $slug = $this->generateSlug($agencyName);
 
             $agencyId = DB::table('meridian_agencies')->insertGetId([
@@ -164,12 +160,10 @@ class MeridianSuperadminController
                 'updated_at'          => now(),
             ]);
 
-            $passwordHash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
-
             $userId = DB::table('meridian_agency_users')->insertGetId([
                 'agency_id'     => $agencyId,
                 'email'         => $userEmail,
-                'password_hash' => $passwordHash,
+                'password_hash' => password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]),
                 'first_name'    => $firstName,
                 'last_name'     => $lastName,
                 'role'          => 'admin',
@@ -333,22 +327,92 @@ class MeridianSuperadminController
         $this->requireAdmin();
 
         try {
-            $total    = DB::table('meridian_agencies')->whereNull('deleted_at')->count();
-            $active   = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','active')->count();
-            $trial    = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','trial')->count();
-            $audits   = DB::table('meridian_audits')->whereMonth('created_at',date('m'))->whereYear('created_at',date('Y'))->count();
-            $brands   = DB::table('meridian_brands')->whereNull('deleted_at')->count();
+            $month = date('m');
+            $year  = date('Y');
+
+            // Agency counts
+            $total     = DB::table('meridian_agencies')->whereNull('deleted_at')->count();
+            $active    = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','active')->count();
+            $trial     = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','trial')->count();
+            $suspended = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','suspended')->count();
+
+            // Brand count
+            $brands = DB::table('meridian_brands')->whereNull('deleted_at')->count();
+
+            // Audit counts
+            $auditsThisMonth = DB::table('meridian_audits')
+                ->whereMonth('created_at', $month)->whereYear('created_at', $year)->count();
+
+            // Audits by status this month
+            $byStatus = DB::table('meridian_audits')
+                ->whereMonth('created_at', $month)->whereYear('created_at', $year)
+                ->select('status', DB::raw('COUNT(*) as count'))
+                ->groupBy('status')
+                ->get()
+                ->map(fn($r) => ['status' => $r->status, 'count' => (int)$r->count])
+                ->toArray();
+
+            // Corpus totals
+            $corpusTotal     = 0;
+            $corpusThisMonth = 0;
+            $corpusByPlatform = [];
+            try {
+                $corpusTotal     = DB::table('meridian_corpus_contributions')->count();
+                $corpusThisMonth = DB::table('meridian_corpus_contributions')
+                    ->whereMonth('created_at', $month)->whereYear('created_at', $year)->count();
+                $corpusByPlatform = DB::table('meridian_corpus_contributions')
+                    ->select('platform', DB::raw('COUNT(*) as count'))
+                    ->groupBy('platform')
+                    ->orderByDesc('count')
+                    ->get()
+                    ->map(fn($r) => ['platform' => $r->platform ?? 'unknown', 'count' => (int)$r->count])
+                    ->toArray();
+            } catch (\Throwable $_) {
+                // corpus table may be empty or not yet have data — fail gracefully
+            }
+
+            // Agencies approaching limit (>= 80% of monthly audit allowance)
+            $agenciesApproachingLimit = [];
+            try {
+                $agencies = DB::table('meridian_agencies')
+                    ->whereNull('deleted_at')
+                    ->where('plan_status', 'active')
+                    ->whereNotNull('monthly_audit_allowance')
+                    ->where('monthly_audit_allowance', '>', 0)
+                    ->get(['id','name','monthly_audit_allowance']);
+
+                foreach ($agencies as $ag) {
+                    $used = DB::table('meridian_audits')
+                        ->where('agency_id', $ag->id)
+                        ->whereMonth('created_at', $month)
+                        ->whereYear('created_at', $year)
+                        ->count();
+                    $pct = ($used / $ag->monthly_audit_allowance) * 100;
+                    if ($pct >= 80) {
+                        $agenciesApproachingLimit[] = [
+                            'name'                   => $ag->name,
+                            'audits_used'            => $used,
+                            'monthly_audit_allowance'=> (int)$ag->monthly_audit_allowance,
+                            'pct'                    => round($pct),
+                        ];
+                    }
+                }
+            } catch (\Throwable $_) {}
 
             json_response([
-                'status'  => 'ok',
-                'period'  => date('Y-m'),
-                'agencies'=> ['total'=>$total,'active'=>$active,'trial'=>$trial,'suspended'=>$total-$active-$trial],
-                'brands'  => ['total'=>$brands],
-                'audits'  => ['thisMonth'=>$audits],
+                'status'   => 'ok',
+                'period'   => date('F Y'),
+                'agencies' => ['total' => $total, 'active' => $active, 'trial' => $trial, 'suspended' => $suspended],
+                'brands'   => ['total' => $brands],
+                'audits'   => ['thisMonth' => $auditsThisMonth, 'byStatus' => $byStatus],
+                'corpus'   => ['total' => $corpusTotal, 'thisMonth' => $corpusThisMonth, 'byPlatform' => $corpusByPlatform],
+                'alerts'   => ['agenciesApproachingLimit' => $agenciesApproachingLimit],
             ]);
+
         } catch (\Throwable $e) {
-            log_error('[Meridian Admin] usage error', ['error'=>$e->getMessage()]);
-            http_response_code(500); json_response(['error'=>'Server error.']);
+            log_error('[Meridian Admin] usage error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error.']);
         }
     }
 
@@ -366,7 +430,7 @@ class MeridianSuperadminController
                 ->join('meridian_brands as b','b.id','=','au.brand_id')
                 ->leftJoin('meridian_clients as c','c.id','=','au.client_id')
                 ->whereNull('ag.deleted_at');
-            if ($status) $query->where('au.status',$status);
+            if ($status) $query->where('au.status', $status);
 
             $total  = $query->count();
             $audits = $query->orderBy('au.created_at','desc')->limit($limit)->offset($offset)
@@ -374,16 +438,23 @@ class MeridianSuperadminController
                        'au.error_message','ag.name as agency_name','b.name as brand_name','c.name as client_name']);
 
             json_response([
-                'status'=>'ok','total'=>$total,'limit'=>$limit,'offset'=>$offset,
-                'audits'=>$audits->map(fn($a)=>[
-                    'id'=>(int)$a->id,'status'=>$a->status,'auditType'=>$a->audit_type,
-                    'agencyName'=>$a->agency_name,'brandName'=>$a->brand_name,'clientName'=>$a->client_name,
-                    'createdAt'=>$a->created_at,'completedAt'=>$a->completed_at,'error'=>$a->error_message,
+                'status' => 'ok', 'total' => $total, 'limit' => $limit, 'offset' => $offset,
+                'audits' => $audits->map(fn($a) => [
+                    'id'         => (int)$a->id,
+                    'status'     => $a->status,
+                    'auditType'  => $a->audit_type,
+                    'agencyName' => $a->agency_name,
+                    'brandName'  => $a->brand_name,
+                    'clientName' => $a->client_name,
+                    'createdAt'  => $a->created_at,
+                    'completedAt'=> $a->completed_at,
+                    'error'      => $a->error_message,
                 ]),
             ]);
         } catch (\Throwable $e) {
-            log_error('[Meridian Admin] audits error', ['error'=>$e->getMessage()]);
-            http_response_code(500); json_response(['error'=>'Server error.']);
+            log_error('[Meridian Admin] audits error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error.']);
         }
     }
 
@@ -404,8 +475,9 @@ class MeridianSuperadminController
             $this->logAdminAction($admin->admin_email,'audit.rerun','audit',$auditId,[]);
             json_response(['status'=>'ok','auditId'=>$auditId]);
         } catch (\Throwable $e) {
-            log_error('[Meridian Admin] rerun error', ['error'=>$e->getMessage()]);
-            http_response_code(500); json_response(['error'=>'Server error.']);
+            log_error('[Meridian Admin] rerun error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error.']);
         }
     }
 
@@ -414,9 +486,74 @@ class MeridianSuperadminController
     {
         $this->requireAdmin();
         try {
-            json_response(['status'=>'ok','corpus'=>['total'=>DB::table('meridian_corpus_contributions')->count()]]);
+            $total = 0;
+            $byCategory = [];
+            $byDitTurn  = [];
+            $byPlatform = [];
+
+            try {
+                $total = DB::table('meridian_corpus_contributions')->count();
+
+                $byCategory = DB::table('meridian_corpus_contributions')
+                    ->select('category', DB::raw('COUNT(*) as count'))
+                    ->groupBy('category')
+                    ->orderByDesc('count')
+                    ->limit(20)
+                    ->get()
+                    ->map(fn($r) => ['category' => $r->category ?? 'unknown', 'count' => (int)$r->count])
+                    ->toArray();
+
+                $byDitTurn = DB::table('meridian_corpus_contributions')
+                    ->select('dit_turn', DB::raw('COUNT(*) as count'))
+                    ->groupBy('dit_turn')
+                    ->orderBy('dit_turn')
+                    ->get()
+                    ->map(fn($r) => ['dit_turn' => $r->dit_turn, 'count' => (int)$r->count])
+                    ->toArray();
+
+                $byPlatform = DB::table('meridian_corpus_contributions')
+                    ->select('platform', DB::raw('COUNT(*) as count'))
+                    ->groupBy('platform')
+                    ->orderByDesc('count')
+                    ->get()
+                    ->map(fn($r) => ['platform' => $r->platform ?? 'unknown', 'count' => (int)$r->count])
+                    ->toArray();
+
+            } catch (\Throwable $_) {
+                // Corpus table may not have data yet — fail gracefully
+            }
+
+            // Research findings
+            $findings = [];
+            try {
+                $findings = DB::table('meridian_research_findings')
+                    ->orderByDesc('created_at')
+                    ->get(['title','finding_type','status','evidence_count','created_at'])
+                    ->map(fn($f) => [
+                        'title'          => $f->title,
+                        'finding_type'   => $f->finding_type,
+                        'status'         => $f->status,
+                        'evidence_count' => (int)$f->evidence_count,
+                        'createdAt'      => $f->created_at,
+                    ])
+                    ->toArray();
+            } catch (\Throwable $_) {}
+
+            json_response([
+                'status'   => 'ok',
+                'corpus'   => [
+                    'total'      => $total,
+                    'byCategory' => $byCategory,
+                    'byDitTurn'  => $byDitTurn,
+                    'byPlatform' => $byPlatform,
+                ],
+                'findings' => $findings,
+            ]);
+
         } catch (\Throwable $e) {
-            http_response_code(500); json_response(['error'=>'Server error.']);
+            log_error('[Meridian Admin] corpus error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error.']);
         }
     }
 
@@ -425,10 +562,18 @@ class MeridianSuperadminController
     {
         $this->requireAdmin();
         try {
-            $deployments = DB::table('meridian_methodology_deployments')->orderBy('deployed_at','desc')->get();
-            json_response(['status'=>'ok','currentVersion'=>$deployments->first()->version??null,'deployments'=>$deployments]);
+            $deployments = DB::table('meridian_methodology_deployments')
+                ->orderBy('deployed_at','desc')
+                ->get();
+            json_response([
+                'status'         => 'ok',
+                'currentVersion' => $deployments->first()->version ?? null,
+                'deployments'    => $deployments,
+            ]);
         } catch (\Throwable $e) {
-            http_response_code(500); json_response(['error'=>'Server error.']);
+            log_error('[Meridian Admin] methodology error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['error' => 'Server error.']);
         }
     }
 
@@ -442,29 +587,23 @@ class MeridianSuperadminController
 
         try {
             if (DB::table('meridian_methodology_deployments')->where('version',$version)->first()) {
-                http_response_code(409); json_response(['error'=>'Version already exists.']); return;
+                http_response_code(409);
+                json_response(['error'=>'Version already exists.']);
+                return;
             }
             DB::table('meridian_methodology_deployments')->insert([
-                'version'=>$version,'description'=>trim($body['description']??''),
-                'changes'=>json_encode($body['changes']??[]),'deployed_by'=>$admin->admin_email,
-                'deployed_at'=>now(),'created_at'=>now(),
+                'version'     => $version,
+                'description' => trim($body['description'] ?? ''),
+                'changes'     => json_encode($body['changes'] ?? []),
+                'deployed_by' => $admin->admin_email,
+                'deployed_at' => now(),
+                'created_at'  => now(),
             ]);
-            json_response(['status'=>'ok','version'=>$version]);
+            json_response(['status' => 'ok', 'version' => $version]);
         } catch (\Throwable $e) {
-            http_response_code(500); json_response(['error'=>'Server error.']);
-        }
-    }
-
-    // ── TEMPORARY: GET /api/meridian/migrate/fix-initiated-by ────
-    // Widens initiated_by from VARCHAR(20) to VARCHAR(100). Run once then remove.
-    public function migrateInitiatedBy(): void
-    {
-        try {
-            DB::statement('ALTER TABLE meridian_audits ALTER COLUMN initiated_by TYPE VARCHAR(100)');
-            json_response(['status' => 'ok', 'message' => 'initiated_by column widened to VARCHAR(100)']);
-        } catch (\Throwable $e) {
+            log_error('[Meridian Admin] methodology/publish error', ['error' => $e->getMessage()]);
             http_response_code(500);
-            json_response(['error' => $e->getMessage()]);
+            json_response(['error' => 'Server error.']);
         }
     }
 
@@ -477,7 +616,10 @@ class MeridianSuperadminController
         if (!$token) { http_response_code(401); json_response(['error'=>'Admin session token required.']); exit; }
 
         $session = DB::table('meridian_admin_sessions')
-            ->where('session_token',$token)->where('revoked',false)->where('expires_at','>',now())->first();
+            ->where('session_token', $token)
+            ->where('revoked', false)
+            ->where('expires_at', '>', now())
+            ->first();
 
         if (!$session) { http_response_code(401); json_response(['error'=>'Invalid or expired admin session.']); exit; }
         if (!in_array($session->admin_email, self::MASTER_EMAILS, true)) { http_response_code(403); json_response(['error'=>'Access denied.']); exit; }
@@ -502,12 +644,17 @@ class MeridianSuperadminController
     {
         try {
             DB::table('meridian_audit_log')->insert([
-                'agency_id'=>0,'user_id'=>0,'action'=>$action,'entity_type'=>$entityType,
-                'entity_id'=>$entityId,'metadata'=>json_encode(array_merge($metadata,['admin'=>$adminEmail])),
-                'ip_address'=>$_SERVER['REMOTE_ADDR']??null,'created_at'=>now(),
+                'agency_id'   => 0,
+                'user_id'     => 0,
+                'action'      => $action,
+                'entity_type' => $entityType,
+                'entity_id'   => $entityId,
+                'metadata'    => json_encode(array_merge($metadata, ['admin' => $adminEmail])),
+                'ip_address'  => $_SERVER['REMOTE_ADDR'] ?? null,
+                'created_at'  => now(),
             ]);
         } catch (\Throwable $e) {
-            log_error('[Meridian Admin] audit log failed', ['error'=>$e->getMessage()]);
+            log_error('[Meridian Admin] audit log failed', ['error' => $e->getMessage()]);
         }
     }
 }
