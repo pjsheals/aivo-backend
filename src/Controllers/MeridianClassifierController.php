@@ -1,8 +1,8 @@
 <?php
 
-namespace App\Controllers;
+namespace Aivo\Controllers;
 
-use App\Meridian\MeridianFilterClassifier;
+use Aivo\Meridian\MeridianFilterClassifier;
 
 class MeridianClassifierController
 {
