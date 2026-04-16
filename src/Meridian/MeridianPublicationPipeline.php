@@ -448,14 +448,19 @@ class MeridianPublicationPipeline
 
         if ($httpCode === 200) return;
 
-        // Create repo
+        // Extract just the repo name from "namespace/repo-name"
+        $repoName = strpos($repoId, '/') !== false
+            ? substr($repoId, strpos($repoId, '/') + 1)
+            : $repoId;
+
+        // Create repo — name must be just the repo name, not namespace/repo
         $ch = curl_init('https://huggingface.co/api/repos/create');
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => json_encode([
                 'type'    => 'dataset',
-                'name'    => $repoId,
+                'name'    => $repoName,
                 'private' => false,
             ]),
             CURLOPT_HTTPHEADER => [
