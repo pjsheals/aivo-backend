@@ -324,8 +324,23 @@ class MeridianPublicationPipeline
 
         if ($httpCode === 200) return; // Already exists
 
-        // Create repo
-        $this->githubRequest('POST', "https://api.github.com/orgs/{$org}/repos", $token, [
+        // Detect personal account vs org — personal accounts use /user/repos
+        $userCh = curl_init('https://api.github.com/user');
+        curl_setopt_array($userCh, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => ["Authorization: Bearer {$token}", "User-Agent: AIVO-Meridian"],
+            CURLOPT_TIMEOUT        => 15,
+        ]);
+        $userResponse = curl_exec($userCh);
+        curl_close($userCh);
+
+        $userData  = json_decode($userResponse, true);
+        $login     = $userData['login'] ?? null;
+        $createUrl = ($login && strtolower($login) === strtolower($org))
+            ? 'https://api.github.com/user/repos'
+            : "https://api.github.com/orgs/{$org}/repos";
+
+        $this->githubRequest('POST', $createUrl, $token, [
             'name'        => $repo,
             'description' => "AIVO Meridian atoms for {$brandName}",
             'private'     => false,
