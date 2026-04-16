@@ -25,6 +25,7 @@ use Aivo\Controllers\MeridianClassifierController;
 use Aivo\Controllers\MeridianBrandContextController;
 use Aivo\Controllers\MeridianEvidenceController;
 use Aivo\Controllers\MeridianAtomController;
+use Aivo\Controllers\MeridianPublicationController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -89,6 +90,9 @@ $routes = [
         // ── Meridian: Atoms ────────────────────────────────────
         '/api/meridian/atoms'                  => [MeridianAtomController::class, 'list'],
         '/api/meridian/atoms/detail'           => [MeridianAtomController::class, 'detail'],
+
+        // ── Meridian: Publication Pipeline ────────────────────
+        '/api/meridian/publish/status'         => [MeridianPublicationController::class, 'status'],
     ],
 
     'POST' => [
@@ -167,6 +171,11 @@ $routes = [
         // ── Meridian: Atoms ────────────────────────────────────
         '/api/meridian/atoms/generate'         => [MeridianAtomController::class, 'generate'],
         '/api/meridian/atoms/generate-all'     => [MeridianAtomController::class, 'generateAll'],
+
+        // ── Meridian: Publication Pipeline ────────────────────
+        '/api/meridian/publish/queue'          => [MeridianPublicationController::class, 'queue'],
+        '/api/meridian/publish/process'        => [MeridianPublicationController::class, 'process'],
+        '/api/meridian/publish/manual-submitted' => [MeridianPublicationController::class, 'markManualSubmitted'],
     ],
 ];
 
