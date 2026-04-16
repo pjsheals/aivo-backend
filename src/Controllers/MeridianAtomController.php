@@ -117,6 +117,44 @@ class MeridianAtomController
     }
 
     /**
+     * POST /api/meridian/atoms/mark-published
+     * Body: { "atom_id": "uuid" }
+     *
+     * Forces atom status to published. Used when publication jobs completed
+     * but checkAndMarkPublished was blocked by stale failed/retrying jobs.
+     */
+    public function markPublished(): void
+    {
+        $auth = MeridianAuth::require();
+        $body = request_body();
+
+        $atomId = $body['atom_id'] ?? null;
+
+        if (!$atomId) {
+            http_response_code(400);
+            json_response(['error' => 'atom_id is required.']);
+            return;
+        }
+
+        $atom = DB::table('meridian_atoms')
+            ->where('id', $atomId)
+            ->where('agency_id', $auth->agency_id)
+            ->first();
+
+        if (!$atom) {
+            http_response_code(403);
+            json_response(['error' => 'Atom not found or access denied.']);
+            return;
+        }
+
+        DB::table('meridian_atoms')
+            ->where('id', $atomId)
+            ->update(['status' => 'published', 'updated_at' => now()]);
+
+        json_response(['success' => true, 'data' => ['atom_id' => $atomId, 'status' => 'published']]);
+    }
+
+    /**
      * GET /api/meridian/atoms?brand_id=1&audit_id=26
      * Returns all atoms grouped by filter_type and model_variant.
      */
