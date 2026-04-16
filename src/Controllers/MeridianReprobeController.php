@@ -18,7 +18,7 @@ use Illuminate\Database\Capsule\Manager as DB;
  */
 class MeridianReprobeController
 {
-    private const REPROBE_LABEL = 'reprobe-post-publication';
+    private const REPROBE_LABEL = 'reprobe';
 
     /**
      * POST /api/meridian/reprobe/initiate
