@@ -26,6 +26,7 @@ use Aivo\Controllers\MeridianBrandContextController;
 use Aivo\Controllers\MeridianEvidenceController;
 use Aivo\Controllers\MeridianAtomController;
 use Aivo\Controllers\MeridianPublicationController;
+use Aivo\Controllers\MeridianCrawlerController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -93,6 +94,9 @@ $routes = [
 
         // ── Meridian: Publication Pipeline ────────────────────
         '/api/meridian/publish/status'         => [MeridianPublicationController::class, 'status'],
+
+        // ── Meridian: Crawler Instructions ────────────────────
+        '/api/meridian/crawler'                => [MeridianCrawlerController::class, 'get'],
     ],
 
     'POST' => [
@@ -176,6 +180,9 @@ $routes = [
         '/api/meridian/publish/queue'          => [MeridianPublicationController::class, 'queue'],
         '/api/meridian/publish/process'        => [MeridianPublicationController::class, 'process'],
         '/api/meridian/publish/manual-submitted' => [MeridianPublicationController::class, 'markManualSubmitted'],
+
+        // ── Meridian: Crawler Instructions ────────────────────
+        '/api/meridian/crawler/generate'       => [MeridianCrawlerController::class, 'generate'],
     ],
 ];
 
