@@ -396,7 +396,7 @@ class MeridianPublicationPipeline
     private function publishToHuggingFace(object $atom, object $brand): array
     {
         $token     = env('HUGGINGFACE_TOKEN');
-        $namespace = env('HUGGINGFACE_NAMESPACE', 'aivo-brands');
+        $namespace = env('HUGGINGFACE_NAMESPACE', 'pjsheals');
 
         if (!$token) throw new \RuntimeException('HUGGINGFACE_TOKEN not configured.');
 
@@ -409,15 +409,35 @@ class MeridianPublicationPipeline
         // Ensure dataset repo exists
         $this->hfEnsureRepo($repoId, $token, $brand->name);
 
-        // Upload file
-        $uploadUrl = "https://huggingface.co/api/datasets/{$repoId}/upload/main/{$filename}";
+        // Upload file via commit API
+        // HF commit API expects multipart: operations header + file blob
+        $boundary   = '----HFBoundary' . uniqid();
+        $operations = json_encode([
+            'key'  => $filename,
+            'type' => 'file',
+        ]);
+
+        $body = "--{$boundary}\r\n";
+        $body .= "Content-Disposition: form-data; name=\"operations\"\r\n\r\n";
+        $body .= json_encode([[
+            'key'  => $filename,
+            'type' => 'file',
+        ]]) . "\r\n";
+        $body .= "--{$boundary}\r\n";
+        $body .= "Content-Disposition: form-data; name=\"file\"; filename=\"" . basename($filename) . "\"\r\n";
+        $body .= "Content-Type: application/json\r\n\r\n";
+        $body .= $content . "\r\n";
+        $body .= "--{$boundary}--\r\n";
+
+        // Use the upload-file endpoint directly
+        $uploadUrl = "https://huggingface.co/api/datasets/{$repoId}/upload/{$filename}";
         $ch = curl_init($uploadUrl);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $content,
             CURLOPT_HTTPHEADER     => [
-                'Content-Type: application/json',
+                'Content-Type: application/octet-stream',
                 "Authorization: Bearer {$token}",
             ],
             CURLOPT_TIMEOUT => 30,
@@ -436,6 +456,7 @@ class MeridianPublicationPipeline
 
     private function hfEnsureRepo(string $repoId, string $token, string $brandName): void
     {
+        // Check if repo exists
         $ch = curl_init("https://huggingface.co/api/datasets/{$repoId}");
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
@@ -453,12 +474,13 @@ class MeridianPublicationPipeline
             ? substr($repoId, strpos($repoId, '/') + 1)
             : $repoId;
 
-        // Create repo — POST /api/datasets (current HF API, /api/repos/create is deprecated)
-        $ch = curl_init('https://huggingface.co/api/datasets');
+        // Create repo via current HF API
+        $ch = curl_init('https://huggingface.co/api/repos/create');
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => json_encode([
+                'type'    => 'dataset',
                 'name'    => $repoName,
                 'private' => false,
             ]),
