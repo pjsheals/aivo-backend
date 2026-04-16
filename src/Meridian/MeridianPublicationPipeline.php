@@ -409,32 +409,12 @@ class MeridianPublicationPipeline
         // Ensure dataset repo exists
         $this->hfEnsureRepo($repoId, $token, $brand->name);
 
-        // Upload file via commit API
-        // HF commit API expects multipart: operations header + file blob
-        $boundary   = '----HFBoundary' . uniqid();
-        $operations = json_encode([
-            'key'  => $filename,
-            'type' => 'file',
-        ]);
-
-        $body = "--{$boundary}\r\n";
-        $body .= "Content-Disposition: form-data; name=\"operations\"\r\n\r\n";
-        $body .= json_encode([[
-            'key'  => $filename,
-            'type' => 'file',
-        ]]) . "\r\n";
-        $body .= "--{$boundary}\r\n";
-        $body .= "Content-Disposition: form-data; name=\"file\"; filename=\"" . basename($filename) . "\"\r\n";
-        $body .= "Content-Type: application/json\r\n\r\n";
-        $body .= $content . "\r\n";
-        $body .= "--{$boundary}--\r\n";
-
-        // Use the upload-file endpoint directly
-        $uploadUrl = "https://huggingface.co/api/datasets/{$repoId}/upload/{$filename}";
+        // Upload file via PUT to direct resolve endpoint
+        $uploadUrl = "https://huggingface.co/datasets/{$repoId}/resolve/main/{$filename}";
         $ch = curl_init($uploadUrl);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST           => true,
+            CURLOPT_CUSTOMREQUEST  => 'PUT',
             CURLOPT_POSTFIELDS     => $content,
             CURLOPT_HTTPHEADER     => [
                 'Content-Type: application/octet-stream',
