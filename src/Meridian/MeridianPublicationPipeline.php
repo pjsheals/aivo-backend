@@ -409,15 +409,29 @@ class MeridianPublicationPipeline
         // Ensure dataset repo exists
         $this->hfEnsureRepo($repoId, $token, $brand->name);
 
-        // Upload file via PUT to direct resolve endpoint
-        $uploadUrl = "https://huggingface.co/datasets/{$repoId}/resolve/main/{$filename}";
-        $ch = curl_init($uploadUrl);
+        // Upload file via the Hub commit API (POST /api/datasets/{namespace}/{repo}/commit/{rev})
+        // Content must be base64-encoded
+        [$ns, $repo] = explode('/', $repoId, 2);
+        $commitUrl = "https://huggingface.co/api/datasets/{$ns}/{$repo}/commit/main";
+
+        $payload = [
+            'summary' => "Add atom: {$atom->filter_type} ({$atom->model_variant})",
+            'files'   => [
+                [
+                    'path'     => $filename,
+                    'content'  => base64_encode($content),
+                    'encoding' => 'base64',
+                ],
+            ],
+        ];
+
+        $ch = curl_init($commitUrl);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CUSTOMREQUEST  => 'PUT',
-            CURLOPT_POSTFIELDS     => $content,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => json_encode($payload),
             CURLOPT_HTTPHEADER     => [
-                'Content-Type: application/octet-stream',
+                'Content-Type: application/json',
                 "Authorization: Bearer {$token}",
             ],
             CURLOPT_TIMEOUT => 30,
