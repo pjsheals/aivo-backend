@@ -27,6 +27,7 @@ use Aivo\Controllers\MeridianEvidenceController;
 use Aivo\Controllers\MeridianAtomController;
 use Aivo\Controllers\MeridianPublicationController;
 use Aivo\Controllers\MeridianCrawlerController;
+use Aivo\Controllers\MeridianAttributionController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -97,6 +98,10 @@ $routes = [
 
         // ── Meridian: Crawler Instructions ────────────────────
         '/api/meridian/crawler'                => [MeridianCrawlerController::class, 'get'],
+
+        // ── Meridian: Attribution ──────────────────────────────
+        '/api/meridian/attribution/stats'      => [MeridianAttributionController::class, 'stats'],
+        '/r'                                   => [MeridianAttributionController::class, 'redirect'],
     ],
 
     'POST' => [
@@ -184,6 +189,9 @@ $routes = [
 
         // ── Meridian: Crawler Instructions ────────────────────
         '/api/meridian/crawler/generate'       => [MeridianCrawlerController::class, 'generate'],
+
+        // ── Meridian: Attribution ──────────────────────────────
+        '/api/meridian/attribution/link'       => [MeridianAttributionController::class, 'createLink'],
     ],
 ];
 
