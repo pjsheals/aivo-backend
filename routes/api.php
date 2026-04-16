@@ -28,6 +28,7 @@ use Aivo\Controllers\MeridianAtomController;
 use Aivo\Controllers\MeridianPublicationController;
 use Aivo\Controllers\MeridianCrawlerController;
 use Aivo\Controllers\MeridianAttributionController;
+use Aivo\Controllers\MeridianReprobeController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -102,6 +103,10 @@ $routes = [
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/stats'      => [MeridianAttributionController::class, 'stats'],
         '/r'                                   => [MeridianAttributionController::class, 'redirect'],
+
+        // ── Meridian: Re-probe ─────────────────────────────────
+        '/api/meridian/reprobe/delta'          => [MeridianReprobeController::class, 'delta'],
+        '/api/meridian/reprobe/history'        => [MeridianReprobeController::class, 'history'],
     ],
 
     'POST' => [
@@ -192,6 +197,9 @@ $routes = [
 
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/link'       => [MeridianAttributionController::class, 'createLink'],
+
+        // ── Meridian: Re-probe ─────────────────────────────────
+        '/api/meridian/reprobe/initiate'       => [MeridianReprobeController::class, 'initiate'],
     ],
 ];
 
