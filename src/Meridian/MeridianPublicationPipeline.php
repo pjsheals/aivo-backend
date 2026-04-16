@@ -453,13 +453,12 @@ class MeridianPublicationPipeline
             ? substr($repoId, strpos($repoId, '/') + 1)
             : $repoId;
 
-        // Create repo — name must be just the repo name, not namespace/repo
-        $ch = curl_init('https://huggingface.co/api/repos/create');
+        // Create repo — POST /api/datasets (current HF API, /api/repos/create is deprecated)
+        $ch = curl_init('https://huggingface.co/api/datasets');
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => json_encode([
-                'type'    => 'dataset',
                 'name'    => $repoName,
                 'private' => false,
             ]),
