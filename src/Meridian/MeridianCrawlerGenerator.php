@@ -1,0 +1,314 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Aivo\Meridian;
+
+use Illuminate\Database\Capsule\Manager as DB;
+
+/**
+ * MeridianCrawlerGenerator — Module 6
+ *
+ * Generates crawler instruction files for a brand based on published atoms.
+ * Produces:
+ *   - robots.txt  — per-agent crawl permissions + routing to structured content
+ *   - llms.txt    — root-level discovery file routing crawlers to model-specific atoms
+ *
+ * Both files are stored in meridian_crawler_instructions and returned
+ * as text for client deployment.
+ */
+class MeridianCrawlerGenerator
+{
+    // Known AI crawler user agents
+    private const CRAWLERS = [
+        'chatgpt'    => ['GPTBot', 'ChatGPT-User', 'OAI-SearchBot'],
+        'gemini'     => ['Google-Extended', 'Googlebot'],
+        'perplexity' => ['PerplexityBot'],
+        'claude'     => ['ClaudeBot', 'anthropic-ai'],
+        'bing'       => ['Bingbot', 'msnbot'],
+        'meta'       => ['FacebookBot', 'meta-externalagent'],
+        'apple'      => ['Applebot'],
+    ];
+
+    // -------------------------------------------------------------------------
+    // Public entry point
+    // -------------------------------------------------------------------------
+
+    public function generate(int $brandId, int $agencyId): array
+    {
+        $brand = DB::table('meridian_brands')->find($brandId);
+        if (!$brand) throw new \RuntimeException("Brand {$brandId} not found.");
+
+        // Fetch all published atoms for this brand
+        $atoms = DB::table('meridian_atoms')
+            ->where('brand_id', $brandId)
+            ->where('status', 'published')
+            ->get();
+
+        // Fetch publication job results for URLs/DOIs
+        $atomIds = $atoms->pluck('id')->toArray();
+        $jobs = [];
+        if (!empty($atomIds)) {
+            $jobRows = DB::table('meridian_publication_jobs')
+                ->whereIn('atom_id', $atomIds)
+                ->where('status', 'completed')
+                ->get();
+            foreach ($jobRows as $job) {
+                $jobs[$job->atom_id][$job->destination] = $job;
+            }
+        }
+
+        $robotsTxt = $this->buildRobotsTxt($brand, $atoms, $jobs);
+        $llmsTxt   = $this->buildLlmsTxt($brand, $atoms, $jobs);
+
+        // Store generated files
+        $id = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+        );
+
+        // Upsert — one record per brand
+        $existing = DB::table('meridian_crawler_instructions')
+            ->where('brand_id', $brandId)
+            ->where('agency_id', $agencyId)
+            ->first();
+
+        if ($existing) {
+            DB::table('meridian_crawler_instructions')
+                ->where('id', $existing->id)
+                ->update([
+                    'robots_txt'   => $robotsTxt,
+                    'llms_txt'     => $llmsTxt,
+                    'atom_count'   => count($atoms),
+                    'generated_at' => now(),
+                    'updated_at'   => now(),
+                ]);
+            $id = $existing->id;
+        } else {
+            DB::table('meridian_crawler_instructions')->insert([
+                'id'           => $id,
+                'brand_id'     => $brandId,
+                'agency_id'    => $agencyId,
+                'robots_txt'   => $robotsTxt,
+                'llms_txt'     => $llmsTxt,
+                'atom_count'   => count($atoms),
+                'generated_at' => now(),
+                'created_at'   => now(),
+                'updated_at'   => now(),
+            ]);
+        }
+
+        return [
+            'id'         => $id,
+            'brand_id'   => $brandId,
+            'brand_name' => $brand->name,
+            'robots_txt' => $robotsTxt,
+            'llms_txt'   => $llmsTxt,
+            'atom_count' => count($atoms),
+        ];
+    }
+
+    public function get(int $brandId, int $agencyId): ?array
+    {
+        $record = DB::table('meridian_crawler_instructions')
+            ->where('brand_id', $brandId)
+            ->where('agency_id', $agencyId)
+            ->first();
+
+        if (!$record) return null;
+
+        return [
+            'id'           => $record->id,
+            'brand_id'     => $record->brand_id,
+            'robots_txt'   => $record->robots_txt,
+            'llms_txt'     => $record->llms_txt,
+            'atom_count'   => $record->atom_count,
+            'generated_at' => $record->generated_at,
+        ];
+    }
+
+    // -------------------------------------------------------------------------
+    // robots.txt builder
+    // -------------------------------------------------------------------------
+
+    private function buildRobotsTxt(object $brand, $atoms, array $jobs): string
+    {
+        $brandSlug = $this->brandSlug($brand->name);
+        $lines     = [];
+
+        $lines[] = "# Generated by AIVO Meridian — {$brand->name}";
+        $lines[] = "# Generated: " . date('Y-m-d H:i:s') . " UTC";
+        $lines[] = "# Brand context atoms: " . count($atoms);
+        $lines[] = "";
+
+        // Universal crawlers
+        $lines[] = "# Universal — all crawlers";
+        $lines[] = "User-agent: *";
+        $lines[] = "Allow: /.well-known/brand.context";
+        $lines[] = "Allow: /llm/";
+        $lines[] = "Allow: /llms.txt";
+        $lines[] = "";
+
+        // Model-specific routing
+        $modelVariants = $this->getModelVariants($atoms);
+
+        foreach (self::CRAWLERS as $platform => $agents) {
+            $lines[] = "# " . ucfirst($platform);
+            foreach ($agents as $agent) {
+                $lines[] = "User-agent: {$agent}";
+            }
+            $lines[] = "Allow: /.well-known/brand.context";
+            if (in_array($platform, $modelVariants, true)) {
+                $lines[] = "Allow: /.well-known/brand.context.{$platform}";
+                $lines[] = "Allow: /llm/atoms/{$platform}/";
+            }
+            $lines[] = "Allow: /llm/atoms/universal/";
+            $lines[] = "Disallow: /internal/";
+            $lines[] = "";
+        }
+
+        // Zenodo DOI references
+        $zenodoDois = $this->getZenodoDois($atoms, $jobs);
+        if (!empty($zenodoDois)) {
+            $lines[] = "# AIVO Meridian — Published atom DOIs";
+            foreach ($zenodoDois as $filterType => $doi) {
+                $lines[] = "# Filter {$filterType}: https://doi.org/{$doi}";
+            }
+            $lines[] = "";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    // -------------------------------------------------------------------------
+    // llms.txt builder
+    // -------------------------------------------------------------------------
+
+    private function buildLlmsTxt(object $brand, $atoms, array $jobs): string
+    {
+        $lines = [];
+
+        $lines[] = "# {$brand->name} — AI Brand Context";
+        $lines[] = "# Generated by AIVO Meridian";
+        $lines[] = "# Standard: MAS 1.1 / AIVO Evidentia Filter Taxonomy WP-2026-01";
+        $lines[] = "";
+        $lines[] = "## Brand";
+        $lines[] = "name: {$brand->name}";
+        if (!empty($brand->website)) {
+            $lines[] = "url: {$brand->website}";
+        }
+        if (!empty($brand->category)) {
+            $lines[] = "category: {$brand->category}";
+        }
+        $lines[] = "";
+
+        // Universal brand context
+        $lines[] = "## Brand Context Files";
+        $lines[] = "brand-context: /.well-known/brand.context";
+
+        $modelVariants = $this->getModelVariants($atoms);
+        foreach ($modelVariants as $variant) {
+            $lines[] = "brand-context-{$variant}: /.well-known/brand.context.{$variant}";
+        }
+        $lines[] = "";
+
+        // Atom index by filter type
+        if (count($atoms) > 0) {
+            $lines[] = "## Evidence Atoms";
+            $lines[] = "# Structured evidence for AI decision-stage reasoning";
+            $lines[] = "";
+
+            $byFilter = [];
+            foreach ($atoms as $atom) {
+                $byFilter[$atom->filter_type][] = $atom;
+            }
+
+            foreach ($byFilter as $filterType => $filterAtoms) {
+                $lines[] = "### Filter: {$filterType}";
+                foreach ($filterAtoms as $atom) {
+                    $variant = $atom->model_variant ?? 'universal';
+                    $lines[] = "atom-{$filterType}-{$variant}: /llm/atoms/{$variant}/{$filterType}.json";
+
+                    // Add Zenodo DOI if available
+                    if (isset($jobs[$atom->id]['zenodo'])) {
+                        $doi = $jobs[$atom->id]['zenodo']->result_doi;
+                        if ($doi) {
+                            $lines[] = "atom-{$filterType}-{$variant}-doi: https://doi.org/{$doi}";
+                        }
+                    }
+
+                    // Add GitHub URL if available
+                    if (isset($jobs[$atom->id]['github'])) {
+                        $url = $jobs[$atom->id]['github']->result_url;
+                        if ($url) {
+                            $lines[] = "atom-{$filterType}-{$variant}-github: {$url}";
+                        }
+                    }
+                }
+                $lines[] = "";
+            }
+        }
+
+        // Model-specific routing instructions
+        $lines[] = "## Crawler Routing";
+        $lines[] = "# Route each AI crawler to its model-specific atom set";
+        $lines[] = "";
+        foreach (self::CRAWLERS as $platform => $agents) {
+            $agentList = implode(', ', $agents);
+            if (in_array($platform, $modelVariants, true)) {
+                $lines[] = "{$platform}-agents: {$agentList}";
+                $lines[] = "{$platform}-atoms: /llm/atoms/{$platform}/";
+                $lines[] = "{$platform}-context: /.well-known/brand.context.{$platform}";
+            } else {
+                $lines[] = "{$platform}-agents: {$agentList}";
+                $lines[] = "{$platform}-atoms: /llm/atoms/universal/";
+                $lines[] = "{$platform}-context: /.well-known/brand.context";
+            }
+            $lines[] = "";
+        }
+
+        // License
+        $lines[] = "## License";
+        $lines[] = "license: CC-BY-4.0";
+        $lines[] = "publisher: AIVO Research Intelligence Platform";
+        $lines[] = "contact: edge@aivoedge.net";
+
+        return implode("\n", $lines);
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private function getModelVariants($atoms): array
+    {
+        $variants = [];
+        foreach ($atoms as $atom) {
+            $v = $atom->model_variant ?? 'universal';
+            if ($v !== 'universal' && !in_array($v, $variants, true)) {
+                $variants[] = $v;
+            }
+        }
+        return $variants;
+    }
+
+    private function getZenodoDois($atoms, array $jobs): array
+    {
+        $dois = [];
+        foreach ($atoms as $atom) {
+            if (isset($jobs[$atom->id]['zenodo'])) {
+                $doi = $jobs[$atom->id]['zenodo']->result_doi;
+                if ($doi) {
+                    $dois[$atom->filter_type] = $doi;
+                }
+            }
+        }
+        return $dois;
+    }
+
+    private function brandSlug(string $name): string
+    {
+        return strtolower(preg_replace('/[^a-z0-9]+/i', '-', trim($name)));
+    }
+}
