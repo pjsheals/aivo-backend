@@ -198,6 +198,11 @@ $routes = [
 // ── Dispatch ──────────────────────────────────────────────────────
 $handler = $routes[$method][$uri] ?? null;
 
+// ── Prefix match for /r/{token} redirect ──────────────────────────
+if ($handler === null && $method === 'GET' && str_starts_with($uri, '/r/')) {
+    $handler = [MeridianAttributionController::class, 'redirect'];
+}
+
 if ($handler === null) {
     abort(404, 'Route not found: ' . $method . ' ' . $uri);
 }
