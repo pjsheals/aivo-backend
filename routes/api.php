@@ -23,6 +23,7 @@ use Aivo\Controllers\MeridianRemediationController;
 use Aivo\Controllers\MeridianPdfController;
 use Aivo\Controllers\MeridianClassifierController;
 use Aivo\Controllers\MeridianBrandContextController;
+use Aivo\Controllers\MeridianEvidenceController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -79,6 +80,10 @@ $routes = [
         // ── Meridian: Brand Context ────────────────────────────
         '/api/meridian/brand-context'       => [MeridianBrandContextController::class, 'list'],
         '/api/meridian/brand-context/download' => [MeridianBrandContextController::class, 'download'],
+
+        // ── Meridian: Evidence Portal ──────────────────────────
+        '/api/meridian/evidence'               => [MeridianEvidenceController::class, 'list'],
+        '/api/meridian/evidence/gaps'          => [MeridianEvidenceController::class, 'gaps'],
     ],
 
     'POST' => [
@@ -148,6 +153,11 @@ $routes = [
 
         // ── Meridian: Brand Context ────────────────────────────
         '/api/meridian/brand-context/generate' => [MeridianBrandContextController::class, 'generate'],
+
+        // ── Meridian: Evidence Portal ──────────────────────────
+        '/api/meridian/evidence/submit'        => [MeridianEvidenceController::class, 'submit'],
+        '/api/meridian/evidence/verify'        => [MeridianEvidenceController::class, 'verify'],
+        '/api/meridian/evidence/delete'        => [MeridianEvidenceController::class, 'delete'],
     ],
 ];
 
