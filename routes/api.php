@@ -175,6 +175,7 @@ $routes = [
         // ── Meridian: Atoms ────────────────────────────────────
         '/api/meridian/atoms/generate'         => [MeridianAtomController::class, 'generate'],
         '/api/meridian/atoms/generate-all'     => [MeridianAtomController::class, 'generateAll'],
+        '/api/meridian/atoms/mark-published'   => [MeridianAtomController::class, 'markPublished'],
 
         // ── Meridian: Publication Pipeline ────────────────────
         '/api/meridian/publish/queue'          => [MeridianPublicationController::class, 'queue'],
