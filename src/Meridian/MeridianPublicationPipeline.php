@@ -255,8 +255,11 @@ class MeridianPublicationPipeline
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_CUSTOMREQUEST  => 'PUT',
             CURLOPT_POSTFIELDS     => $content,
-            CURLOPT_HTTPHEADER     => ['Authorization: Bearer ' . $token],
-            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_HTTPHEADER     => [
+                'Content-Type: application/octet-stream',
+                'Authorization: Bearer ' . $token,
+            ],
+            CURLOPT_TIMEOUT => 30,
         ]);
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
