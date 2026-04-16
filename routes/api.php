@@ -24,6 +24,7 @@ use Aivo\Controllers\MeridianPdfController;
 use Aivo\Controllers\MeridianClassifierController;
 use Aivo\Controllers\MeridianBrandContextController;
 use Aivo\Controllers\MeridianEvidenceController;
+use Aivo\Controllers\MeridianAtomController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -84,6 +85,10 @@ $routes = [
         // ── Meridian: Evidence Portal ──────────────────────────
         '/api/meridian/evidence'               => [MeridianEvidenceController::class, 'list'],
         '/api/meridian/evidence/gaps'          => [MeridianEvidenceController::class, 'gaps'],
+
+        // ── Meridian: Atoms ────────────────────────────────────
+        '/api/meridian/atoms'                  => [MeridianAtomController::class, 'list'],
+        '/api/meridian/atoms/detail'           => [MeridianAtomController::class, 'detail'],
     ],
 
     'POST' => [
@@ -158,6 +163,10 @@ $routes = [
         '/api/meridian/evidence/submit'        => [MeridianEvidenceController::class, 'submit'],
         '/api/meridian/evidence/verify'        => [MeridianEvidenceController::class, 'verify'],
         '/api/meridian/evidence/delete'        => [MeridianEvidenceController::class, 'delete'],
+
+        // ── Meridian: Atoms ────────────────────────────────────
+        '/api/meridian/atoms/generate'         => [MeridianAtomController::class, 'generate'],
+        '/api/meridian/atoms/generate-all'     => [MeridianAtomController::class, 'generateAll'],
     ],
 ];
 
