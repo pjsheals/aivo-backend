@@ -10,22 +10,25 @@ use Illuminate\Database\Capsule\Manager as DB;
 /**
  * MeridianReprobeController — Module 8
  *
- * Initiates a post-publication re-probe and calculates RCS delta.
+ * Initiates a post-publication re-probe and calculates RCS delta + turn delta.
  *
  * POST /api/meridian/reprobe/initiate   — Trigger a re-probe audit
- * GET  /api/meridian/reprobe/delta      — Get RCS delta for a brand
+ * GET  /api/meridian/reprobe/delta      — Get RCS delta + per-platform turn delta
  * GET  /api/meridian/reprobe/history    — List all re-probes for a brand
+ *
+ * Stage 6 additions:
+ *   - turn_delta_data: per-platform DIT (displacement inflection turn) before vs after.
+ *     Positive delta = brand survived longer = atoms working.
+ *     Requires M1 classifier to have run on both baseline and re-probe audits.
  */
 class MeridianReprobeController
 {
-    private const REPROBE_LABEL = 'reprobe';
+    private const REPROBE_LABEL  = 'reprobe';
+    private const PROBE_PLATFORMS = ['chatgpt', 'gemini', 'perplexity'];
 
     /**
      * POST /api/meridian/reprobe/initiate
      * Body: { "brand_id": 2, "platforms": ["chatgpt","gemini","perplexity"] (optional) }
-     *
-     * Initiates a new directed BJP audit tagged as a re-probe.
-     * Uses the same engine as regular audits — just tagged differently.
      */
     public function initiate(): void
     {
@@ -33,7 +36,7 @@ class MeridianReprobeController
         $body = request_body();
 
         $brandId   = isset($body['brand_id']) ? (int)$body['brand_id'] : null;
-        $platforms = isset($body['platforms']) ? (array)$body['platforms'] : ['chatgpt', 'gemini', 'perplexity'];
+        $platforms = isset($body['platforms']) ? (array)$body['platforms'] : self::PROBE_PLATFORMS;
 
         if (!$brandId) {
             http_response_code(400);
@@ -53,7 +56,6 @@ class MeridianReprobeController
             return;
         }
 
-        // Check for already-running audit
         $running = DB::table('meridian_audits')
             ->where('brand_id', $brandId)
             ->whereIn('status', ['queued', 'running'])
@@ -65,7 +67,7 @@ class MeridianReprobeController
             return;
         }
 
-        // Find baseline audit (most recent completed audit that is NOT a re-probe)
+        // Baseline = most recent completed non-reprobe audit
         $baseline = DB::table('meridian_audits')
             ->where('brand_id', $brandId)
             ->where('agency_id', $auth->agency_id)
@@ -80,18 +82,15 @@ class MeridianReprobeController
             return;
         }
 
-        // Get baseline RCS
         $baselineResult = DB::table('meridian_brand_audit_results')
             ->where('audit_id', $baseline->id)
             ->first();
 
         $baselineRcs = $baselineResult ? (int)$baselineResult->rcs_total : null;
 
-        // Methodology version
         $methodologyVersion   = DB::table('meridian_methodology_versions')->orderBy('id', 'desc')->first();
         $methodologyVersionId = $methodologyVersion ? $methodologyVersion->id : null;
 
-        // Build default prompts with brand/category substitutions
         $brandName = $brand->name;
         $category  = $brand->category ?: 'product';
 
@@ -106,11 +105,9 @@ class MeridianReprobeController
             'generic_t4'  => "Based on everything we've discussed, what would you recommend I buy and where can I get it from?",
         ];
 
-        $validPlatforms = array_filter($platforms, fn($p) => in_array($p, ['chatgpt', 'gemini', 'perplexity'], true));
-        $validPlatforms = array_values($validPlatforms);
-        if (empty($validPlatforms)) $validPlatforms = ['chatgpt', 'gemini', 'perplexity'];
+        $validPlatforms = array_values(array_filter($platforms, fn($p) => in_array($p, self::PROBE_PLATFORMS, true)));
+        if (empty($validPlatforms)) $validPlatforms = self::PROBE_PLATFORMS;
 
-        // Build probe runs (directed BJP only — anchored + generic per platform)
         $probeRuns = [];
         foreach ($validPlatforms as $platform) {
             foreach (['anchored', 'generic'] as $mode) {
@@ -164,7 +161,6 @@ class MeridianReprobeController
                 ]);
             }
 
-            // Store reprobe record
             $reprobeId = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
                 mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
@@ -172,17 +168,18 @@ class MeridianReprobeController
             );
 
             DB::table('meridian_reprobe_results')->insert([
-                'id'           => $reprobeId,
-                'brand_id'     => $brandId,
-                'agency_id'    => $auth->agency_id,
-                'audit_id'     => $auditId,
+                'id'                => $reprobeId,
+                'brand_id'          => $brandId,
+                'agency_id'         => $auth->agency_id,
+                'audit_id'          => $auditId,
                 'baseline_audit_id' => $baseline->id,
-                'baseline_rcs' => $baselineRcs,
-                'reprobe_rcs'  => null,
-                'rcs_delta'    => null,
-                'status'       => 'running',
-                'created_at'   => now(),
-                'updated_at'   => now(),
+                'baseline_rcs'      => $baselineRcs,
+                'reprobe_rcs'       => null,
+                'rcs_delta'         => null,
+                'turn_delta_data'   => null,
+                'status'            => 'running',
+                'created_at'        => now(),
+                'updated_at'        => now(),
             ]);
 
             DB::commit();
@@ -195,7 +192,6 @@ class MeridianReprobeController
             return;
         }
 
-        // Fire background worker
         $workerScript = realpath(__DIR__ . '/../../workers/run_audit.php');
         if ($workerScript && file_exists($workerScript)) {
             $cmd = PHP_BINARY . ' ' . escapeshellarg($workerScript)
@@ -205,8 +201,8 @@ class MeridianReprobeController
         }
 
         json_response([
-            'success'      => true,
-            'data'         => [
+            'success' => true,
+            'data'    => [
                 'reprobe_id'   => $reprobeId,
                 'audit_id'     => $auditId,
                 'brand_id'     => $brandId,
@@ -221,8 +217,10 @@ class MeridianReprobeController
     /**
      * GET /api/meridian/reprobe/delta?brand_id=X
      *
-     * Returns the RCS delta for the most recent completed re-probe.
-     * Calculates delta if audit has completed but delta not yet stored.
+     * Returns RCS delta + per-platform turn delta for the most recent re-probe.
+     * Turn delta = reprobe dit_turn minus baseline dit_turn per platform.
+     * Positive = brand survived longer = atoms working.
+     * Requires M1 classifier to have run on both audits.
      */
     public function delta(): void
     {
@@ -257,55 +255,88 @@ class MeridianReprobeController
             return;
         }
 
-        // If re-probe audit has completed but delta not yet calculated — calculate now
-        if ($reprobe->rcs_delta === null) {
-            $audit = DB::table('meridian_audits')->find($reprobe->audit_id);
-            if ($audit && $audit->status === 'completed') {
-                $result = DB::table('meridian_brand_audit_results')
-                    ->where('audit_id', $reprobe->audit_id)
-                    ->first();
+        $audit = DB::table('meridian_audits')->find($reprobe->audit_id);
 
-                if ($result) {
-                    $reprobeRcs = (int)$result->rcs_total;
-                    $delta      = $reprobeRcs - (int)$reprobe->baseline_rcs;
+        // ── RCS delta ────────────────────────────────────────────
+        if ($reprobe->rcs_delta === null && $audit && $audit->status === 'completed') {
+            $result = DB::table('meridian_brand_audit_results')
+                ->where('audit_id', $reprobe->audit_id)
+                ->first();
 
-                    DB::table('meridian_reprobe_results')
-                        ->where('id', $reprobe->id)
-                        ->update([
-                            'reprobe_rcs' => $reprobeRcs,
-                            'rcs_delta'   => $delta,
-                            'status'      => 'completed',
-                            'updated_at'  => now(),
-                        ]);
+            if ($result) {
+                $reprobeRcs = (int)$result->rcs_total;
+                $rcsDelta   = $reprobeRcs - (int)$reprobe->baseline_rcs;
 
-                    $reprobe->reprobe_rcs = $reprobeRcs;
-                    $reprobe->rcs_delta   = $delta;
-                    $reprobe->status      = 'completed';
-                }
+                DB::table('meridian_reprobe_results')
+                    ->where('id', $reprobe->id)
+                    ->update([
+                        'reprobe_rcs' => $reprobeRcs,
+                        'rcs_delta'   => $rcsDelta,
+                        'updated_at'  => now(),
+                    ]);
+
+                $reprobe->reprobe_rcs = $reprobeRcs;
+                $reprobe->rcs_delta   = $rcsDelta;
             }
+        }
+
+        // ── Turn delta ───────────────────────────────────────────
+        // Calculate if not yet stored and audit is complete
+        $turnDeltaData = $reprobe->turn_delta_data
+            ? json_decode($reprobe->turn_delta_data, true)
+            : null;
+
+        if ($turnDeltaData === null && $audit && $audit->status === 'completed') {
+            $turnDeltaData = $this->calculateTurnDelta(
+                (int)$reprobe->baseline_audit_id,
+                (int)$reprobe->audit_id
+            );
+
+            if ($turnDeltaData !== null) {
+                DB::table('meridian_reprobe_results')
+                    ->where('id', $reprobe->id)
+                    ->update([
+                        'turn_delta_data' => json_encode($turnDeltaData),
+                        'status'          => 'completed',
+                        'updated_at'      => now(),
+                    ]);
+                $reprobe->status = 'completed';
+            }
+        }
+
+        // If both RCS and turn are resolved, mark completed
+        if ($reprobe->rcs_delta !== null
+            && $reprobe->status !== 'completed'
+            && $audit && $audit->status === 'completed'
+        ) {
+            DB::table('meridian_reprobe_results')
+                ->where('id', $reprobe->id)
+                ->update(['status' => 'completed', 'updated_at' => now()]);
+            $reprobe->status = 'completed';
         }
 
         json_response([
             'success' => true,
             'data'    => [
-                'id'           => $reprobe->id,
-                'brand_id'     => $brandId,
-                'brand_name'   => $brand->name,
-                'baseline_rcs' => $reprobe->baseline_rcs,
-                'reprobe_rcs'  => $reprobe->reprobe_rcs,
-                'rcs_delta'    => $reprobe->rcs_delta,
-                'delta_label'  => $this->deltaLabel($reprobe->rcs_delta),
-                'status'       => $reprobe->status,
-                'audit_id'     => $reprobe->audit_id,
-                'created_at'   => $reprobe->created_at,
+                'id'              => $reprobe->id,
+                'brand_id'        => $brandId,
+                'brand_name'      => $brand->name,
+                'baseline_rcs'    => $reprobe->baseline_rcs,
+                'reprobe_rcs'     => $reprobe->reprobe_rcs,
+                'rcs_delta'       => $reprobe->rcs_delta,
+                'delta_label'     => $this->deltaLabel($reprobe->rcs_delta),
+                'turn_delta_data' => $turnDeltaData,
+                'turn_delta_available' => $turnDeltaData !== null,
+                'status'          => $reprobe->status,
+                'audit_id'        => $reprobe->audit_id,
+                'baseline_audit_id' => $reprobe->baseline_audit_id,
+                'created_at'      => $reprobe->created_at,
             ],
         ]);
     }
 
     /**
      * GET /api/meridian/reprobe/history?brand_id=X
-     *
-     * Returns all re-probes for a brand in reverse chronological order.
      */
     public function history(): void
     {
@@ -338,16 +369,66 @@ class MeridianReprobeController
         json_response([
             'success' => true,
             'data'    => $reprobes->map(fn($r) => [
-                'id'           => $r->id,
-                'baseline_rcs' => $r->baseline_rcs,
-                'reprobe_rcs'  => $r->reprobe_rcs,
-                'rcs_delta'    => $r->rcs_delta,
-                'delta_label'  => $this->deltaLabel($r->rcs_delta),
-                'status'       => $r->status,
-                'audit_id'     => $r->audit_id,
-                'created_at'   => $r->created_at,
+                'id'              => $r->id,
+                'baseline_rcs'    => $r->baseline_rcs,
+                'reprobe_rcs'     => $r->reprobe_rcs,
+                'rcs_delta'       => $r->rcs_delta,
+                'delta_label'     => $this->deltaLabel($r->rcs_delta),
+                'turn_delta_data' => $r->turn_delta_data ? json_decode($r->turn_delta_data, true) : null,
+                'status'          => $r->status,
+                'audit_id'        => $r->audit_id,
+                'created_at'      => $r->created_at,
             ])->toArray(),
         ]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Turn delta calculation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Compare M1 filter_classifications between baseline and re-probe audits.
+     * Returns per-platform { baseline_dit, reprobe_dit, delta, baseline_t4, reprobe_t4 }.
+     * Returns null if no classifications exist for the re-probe audit yet.
+     */
+    private function calculateTurnDelta(int $baselineAuditId, int $reprobeAuditId): ?array
+    {
+        // Get re-probe classifications — if none exist, classifier hasn't run yet
+        $reprobeClassifications = DB::table('meridian_filter_classifications')
+            ->where('audit_id', $reprobeAuditId)
+            ->get()
+            ->keyBy('platform');
+
+        if ($reprobeClassifications->isEmpty()) {
+            return null;
+        }
+
+        $baselineClassifications = DB::table('meridian_filter_classifications')
+            ->where('audit_id', $baselineAuditId)
+            ->get()
+            ->keyBy('platform');
+
+        $result = [];
+
+        foreach (self::PROBE_PLATFORMS as $platform) {
+            $baseline = $baselineClassifications->get($platform);
+            $reprobe  = $reprobeClassifications->get($platform);
+
+            $baselineDit = $baseline ? ($baseline->dit_turn  !== null ? (int)$baseline->dit_turn  : null) : null;
+            $reprobeDit  = $reprobe  ? ($reprobe->dit_turn   !== null ? (int)$reprobe->dit_turn    : null) : null;
+            $delta       = ($baselineDit !== null && $reprobeDit !== null) ? ($reprobeDit - $baselineDit) : null;
+
+            $result[$platform] = [
+                'baseline_dit'      => $baselineDit,
+                'reprobe_dit'       => $reprobeDit,
+                'delta'             => $delta,
+                'baseline_t4'       => $baseline ? ($baseline->t4_winner ?? null) : null,
+                'reprobe_t4'        => $reprobe  ? ($reprobe->t4_winner  ?? null) : null,
+                'delta_label'       => $this->turnDeltaLabel($delta),
+            ];
+        }
+
+        return $result;
     }
 
     // -------------------------------------------------------------------------
@@ -362,5 +443,13 @@ class MeridianReprobeController
         if ($delta === 0) return 'no_change';
         if ($delta > -10) return 'marginal_decline';
         return 'significant_decline';
+    }
+
+    private function turnDeltaLabel(?int $delta): string
+    {
+        if ($delta === null) return 'pending';
+        if ($delta > 0)   return 'survived_longer';
+        if ($delta === 0) return 'no_change';
+        return 'earlier_displacement';
     }
 }
