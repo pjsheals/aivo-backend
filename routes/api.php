@@ -215,6 +215,7 @@ $routes = [
 
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/link'       => [MeridianAttributionController::class, 'createLink'],
+        '/api/meridian/attribution/link/delete' => [MeridianAttributionController::class, 'deleteLink'],
 
         // ── Meridian: Re-probe ─────────────────────────────────
         '/api/meridian/reprobe/initiate'       => [MeridianReprobeController::class, 'initiate'],
