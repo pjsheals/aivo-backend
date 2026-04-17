@@ -14,6 +14,9 @@ use Illuminate\Database\Capsule\Manager as DB;
  * POST /api/meridian/clients/create   — Create new client
  * POST /api/meridian/clients/update   — Update client (id in body)
  * POST /api/meridian/clients/delete   — Delete client (id in body)
+ *
+ * Metering note: clients are unlimited at all plan tiers (Boutique/Studio/Network/Enterprise).
+ * The only enforced limit is max_brands. Client count is organisational convenience only.
  */
 class MeridianClientController
 {
@@ -30,7 +33,6 @@ class MeridianClientController
                 ->orderBy('name')
                 ->get();
 
-            // Attach brand count and total RAR to each client
             $result = $clients->map(function ($client) {
                 $brands = DB::table('meridian_brands')
                     ->where('client_id', $client->id)
@@ -79,20 +81,8 @@ class MeridianClientController
             return;
         }
 
-        // Check plan limit
-        if ($auth->agency->max_clients !== null) {
-            $current = DB::table('meridian_clients')
-                ->where('agency_id', $auth->agency_id)
-                ->where('is_active', true)
-                ->whereNull('deleted_at')
-                ->count();
-
-            if ($current >= $auth->agency->max_clients) {
-                http_response_code(403);
-                json_response(['error' => 'Client limit reached for your plan. Upgrade to add more clients.']);
-                return;
-            }
-        }
+        // No client limit — clients are unlimited at all Meridian plan tiers.
+        // Brand count (max_brands) is the only enforced limit.
 
         try {
             $id = DB::table('meridian_clients')->insertGetId([
@@ -142,7 +132,6 @@ class MeridianClientController
             return;
         }
 
-        // Verify client belongs to this agency
         $client = DB::table('meridian_clients')
             ->where('id', $id)
             ->where('agency_id', $auth->agency_id)
@@ -202,7 +191,6 @@ class MeridianClientController
         }
 
         try {
-            // Soft delete — preserve all historical data
             DB::table('meridian_clients')
                 ->where('id', $id)
                 ->update(['is_active' => false, 'deleted_at' => now(), 'updated_at' => now()]);
