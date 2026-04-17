@@ -695,12 +695,7 @@ class MeridianSuperadminController
     // ── POST /api/meridian/admin/run-migration ───────────────────
     public function runMigration(): void
     {
-        $secret = $_SERVER['HTTP_X_MERIDIAN_SECRET'] ?? '';
-        if ($secret !== env('MERIDIAN_INTERNAL_SECRET', 'aivo-admin-2026')) {
-            http_response_code(403);
-            json_response(['error' => 'Forbidden.']);
-            return;
-        }
+        $this->requireAdmin();
 
         $statements = [
             "ALTER TABLE meridian_probe_runs ADD COLUMN IF NOT EXISTS probe_type VARCHAR(30)",
