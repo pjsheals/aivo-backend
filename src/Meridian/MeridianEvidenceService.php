@@ -30,7 +30,6 @@ class MeridianEvidenceService
         'self_published' => 1,
     ];
 
-    // Known Tier 1 domains for source type validation
     private const TIER1_DOMAINS = [
         'pubmed.ncbi.nlm.nih.gov', 'ncbi.nlm.nih.gov',
         'doi.org', 'zenodo.org',
@@ -39,6 +38,12 @@ class MeridianEvidenceService
         'journals.plos.org', 'nature.com', 'sciencedirect.com',
         'jamanetwork.com', 'bmj.com', 'thelancet.com',
         'dermatologyresearch.net', 'jaad.org',
+    ];
+
+    private const PROBE_TYPE_LABELS = [
+        'awareness'                  => 'Awareness',
+        'decision_stage'             => 'Decision-Stage',
+        'spontaneous_consideration'  => 'Spontaneous Consideration',
     ];
 
     // -------------------------------------------------------------------------
@@ -80,9 +85,9 @@ class MeridianEvidenceService
         ]);
 
         return [
-            'submission_id'    => $id,
-            'authority_score'  => $authorityScore,
-            'authority_tier'   => $this->getTierLabel($authorityScore),
+            'submission_id'       => $id,
+            'authority_score'     => $authorityScore,
+            'authority_tier'      => $this->getTierLabel($authorityScore),
             'verification_status' => 'pending',
         ];
     }
@@ -105,27 +110,20 @@ class MeridianEvidenceService
         $doiResolves = false;
         $notes       = [];
 
-        // Check URL resolves
         if ($submission->source_url) {
             $urlResolves = $this->checkUrlResolves($submission->source_url);
-            if (!$urlResolves) {
-                $notes[] = 'URL did not return HTTP 200.';
-            }
+            if (!$urlResolves) $notes[] = 'URL did not return HTTP 200.';
         }
 
-        // Check DOI resolves
         if ($submission->doi) {
             $doiResolves = $this->checkDoiResolves($submission->doi);
-            if (!$doiResolves) {
-                $notes[] = 'DOI did not resolve via doi.org.';
-            }
+            if (!$doiResolves) $notes[] = 'DOI did not resolve via doi.org.';
         }
 
-        // Determine final verification status
-        $hasContent   = $submission->source_url || $submission->doi || $submission->free_text;
-        $urlOk        = !$submission->source_url || $urlResolves;
-        $doiOk        = !$submission->doi        || $doiResolves;
-        $status       = ($hasContent && $urlOk && $doiOk) ? 'verified' : 'failed';
+        $hasContent = $submission->source_url || $submission->doi || $submission->free_text;
+        $urlOk      = !$submission->source_url || $urlResolves;
+        $doiOk      = !$submission->doi        || $doiResolves;
+        $status     = ($hasContent && $urlOk && $doiOk) ? 'verified' : 'failed';
 
         if (!$hasContent) {
             $notes[] = 'No source URL, DOI, or free text provided.';
@@ -143,13 +141,13 @@ class MeridianEvidenceService
             ]);
 
         return [
-            'submission_id'      => $submissionId,
-            'verified'           => $status === 'verified',
-            'verification_status'=> $status,
-            'url_resolves'       => $urlResolves,
-            'doi_resolves'       => $doiResolves,
-            'notes'              => $notes,
-            'authority_score'    => $submission->authority_score,
+            'submission_id'       => $submissionId,
+            'verified'            => $status === 'verified',
+            'verification_status' => $status,
+            'url_resolves'        => $urlResolves,
+            'doi_resolves'        => $doiResolves,
+            'notes'               => $notes,
+            'authority_score'     => $submission->authority_score,
         ];
     }
 
@@ -163,19 +161,14 @@ class MeridianEvidenceService
             ->where('brand_id', $brandId)
             ->orderByDesc('created_at');
 
-        if ($auditId) {
-            $query->where('audit_id', $auditId);
-        }
+        if ($auditId) $query->where('audit_id', $auditId);
 
         $rows = $query->get();
 
-        // Group by filter_type
         $grouped = [];
         foreach ($rows as $row) {
             $filter = $row->filter_type;
-            if (!isset($grouped[$filter])) {
-                $grouped[$filter] = [];
-            }
+            if (!isset($grouped[$filter])) $grouped[$filter] = [];
             $grouped[$filter][] = [
                 'id'                  => $row->id,
                 'filter_type'         => $row->filter_type,
@@ -200,72 +193,142 @@ class MeridianEvidenceService
     }
 
     // -------------------------------------------------------------------------
-    // Get gap completion status
-    // Tells M4 which gaps have enough verified evidence to generate atoms
+    // Get gap completion status — Stage 1 updated version
+    //
+    // Now returns full displacement context per gap:
+    // - probe_type (awareness / decision_stage / spontaneous_consideration)
+    // - displacement_turn (when the brand was displaced)
+    // - handoff_turn (when the commercial moment occurs)
+    // - survival_gap (turns between displacement and handoff = revenue exposure)
+    // - displacement_criteria (the specific question that caused routing away)
+    // - displacing_brand (who captured the routing)
+    // - platforms affected
+    // - full evidence submission list per gap
     // -------------------------------------------------------------------------
 
     public function getGapCompletionStatus(int $brandId, int $auditId): array
     {
-        // Load gaps from M1 classifications
+        // Load all classifications for this audit
         $classifications = DB::table('meridian_filter_classifications')
             ->where('audit_id', $auditId)
+            ->orderBy('created_at')
             ->get();
 
-        $gaps = [];
+        if ($classifications->isEmpty()) {
+            return [
+                'gaps_total'   => 0,
+                'gaps_ready'   => 0,
+                'classified'   => false,
+                'filters'      => [],
+            ];
+        }
+
+        // Build gap map — one entry per filter, aggregating across platforms
+        // A filter can appear on multiple platforms with different displacement context
+        $gapMap = [];
+
         foreach ($classifications as $c) {
             $gapData = json_decode($c->evidence_gaps ?? '[]', true);
+
             foreach ($gapData as $gap) {
                 $filter = $gap['filter'] ?? null;
-                if ($filter && !isset($gaps[$filter])) {
-                    $gaps[$filter] = [
-                        'filter'   => $filter,
-                        'platform' => $c->platform,
-                        'gap'      => $gap['gap'] ?? '',
+                if (!$filter) continue;
+
+                $key = $filter; // one gap card per filter (aggregated across platforms)
+
+                if (!isset($gapMap[$key])) {
+                    $gapMap[$key] = [
+                        'filter'                => $filter,
+                        'gap_description'       => $gap['gap'] ?? '',
+                        'probe_type'            => $c->probe_type ?? 'decision_stage',
+                        'probe_type_label'      => self::PROBE_TYPE_LABELS[$c->probe_type ?? 'decision_stage'] ?? 'Decision-Stage',
+                        'displacement_turn'     => $c->dit_turn     ? (int)$c->dit_turn     : null,
+                        'handoff_turn'          => $c->handoff_turn ? (int)$c->handoff_turn : null,
+                        'survival_gap'          => $c->survival_gap ? (int)$c->survival_gap : null,
+                        'displacement_criteria' => $c->displacement_criteria ?? null,
+                        'displacement_mechanism'=> $c->displacement_mechanism ?? null,
+                        'displacing_brand'      => $c->t4_winner   ?? null,
+                        'platforms_affected'    => [],
+                        'primary_filter'        => $c->primary_filter ?? $filter,
+                        'confidence'            => (int)($c->confidence_score ?? 0),
                     ];
+                }
+
+                // Add platform to affected list
+                if (!in_array($c->platform, $gapMap[$key]['platforms_affected'])) {
+                    $gapMap[$key]['platforms_affected'][] = $c->platform;
+                }
+
+                // If this platform has a worse survival gap, use it (most urgent)
+                $existingGap = $gapMap[$key]['survival_gap'];
+                $thisGap     = $c->survival_gap ? (int)$c->survival_gap : null;
+                if ($thisGap !== null && ($existingGap === null || $thisGap > $existingGap)) {
+                    $gapMap[$key]['survival_gap']           = $thisGap;
+                    $gapMap[$key]['displacement_turn']      = $c->dit_turn     ? (int)$c->dit_turn     : null;
+                    $gapMap[$key]['handoff_turn']           = $c->handoff_turn ? (int)$c->handoff_turn : null;
+                    $gapMap[$key]['displacement_criteria']  = $c->displacement_criteria ?? $gapMap[$key]['displacement_criteria'];
+                    $gapMap[$key]['displacing_brand']       = $c->t4_winner    ?? $gapMap[$key]['displacing_brand'];
                 }
             }
         }
 
-        // For each gap, check if verified evidence exists
+        // For each gap, load evidence submissions and compute readiness
         $status = [];
-        foreach ($gaps as $filter => $gapInfo) {
-            $verifiedCount = DB::table('meridian_evidence_submissions')
-                ->where('brand_id', $brandId)
-                ->where('audit_id', $auditId)
-                ->where('filter_type', $filter)
-                ->where('verification_status', 'verified')
-                ->count();
 
-            $totalCount = DB::table('meridian_evidence_submissions')
+        foreach ($gapMap as $filter => $gapInfo) {
+            // Load all evidence submissions for this filter
+            $submissions = DB::table('meridian_evidence_submissions')
                 ->where('brand_id', $brandId)
                 ->where('audit_id', $auditId)
                 ->where('filter_type', $filter)
-                ->count();
+                ->orderByDesc('authority_score')
+                ->orderByDesc('created_at')
+                ->get();
 
-            // Check if at least one Tier 1 or Tier 2 source exists for T3/T4 gaps
-            $hasTier1or2 = DB::table('meridian_evidence_submissions')
-                ->where('brand_id', $brandId)
-                ->where('audit_id', $auditId)
-                ->where('filter_type', $filter)
+            $totalCount    = $submissions->count();
+            $verifiedCount = $submissions->where('verification_status', 'verified')->count();
+            $hasTier1or2   = $submissions
                 ->where('verification_status', 'verified')
                 ->where('authority_score', '>=', 3)
                 ->count() > 0;
 
-            $status[$filter] = [
-                'filter'          => $filter,
-                'gap_description' => $gapInfo['gap'],
-                'platform'        => $gapInfo['platform'],
-                'total_submitted' => $totalCount,
-                'verified_count'  => $verifiedCount,
-                'has_tier1_or_2'  => $hasTier1or2,
-                'ready_for_atoms' => $verifiedCount > 0 && $hasTier1or2,
-            ];
+            // Format evidence items for frontend
+            $evidenceItems = $submissions->map(fn($s) => [
+                'id'                  => $s->id,
+                'source_type'         => $s->source_type,
+                'source_url'          => $s->source_url,
+                'source_title'        => $s->source_title,
+                'doi'                 => $s->doi,
+                'free_text'           => $s->free_text,
+                'date_published'      => $s->date_published,
+                'authority_score'     => (int)$s->authority_score,
+                'authority_tier'      => $this->getTierLabel($s->authority_score),
+                'verification_status' => $s->verification_status,
+                'verification_notes'  => $s->verification_notes,
+                'created_at'          => $s->created_at,
+            ])->values()->toArray();
+
+            $status[] = array_merge($gapInfo, [
+                'total_submitted'  => $totalCount,
+                'verified_count'   => $verifiedCount,
+                'has_tier1_or_2'   => $hasTier1or2,
+                'ready_for_atoms'  => $verifiedCount > 0 && $hasTier1or2,
+                'evidence_items'   => $evidenceItems,
+            ]);
         }
 
+        // Sort by survival_gap descending (most urgent first — most turns of exposure)
+        usort($status, function($a, $b) {
+            $gapA = $a['survival_gap'] ?? -1;
+            $gapB = $b['survival_gap'] ?? -1;
+            return $gapB <=> $gapA;
+        });
+
         return [
-            'gaps_total'        => count($gaps),
-            'gaps_ready'        => count(array_filter($status, fn($s) => $s['ready_for_atoms'])),
-            'filters'           => array_values($status),
+            'gaps_total'   => count($status),
+            'gaps_ready'   => count(array_filter($status, fn($s) => $s['ready_for_atoms'])),
+            'classified'   => true,
+            'filters'      => $status,
         ];
     }
 
@@ -346,8 +409,8 @@ class MeridianEvidenceService
 
     private function checkDoiResolves(string $doi): bool
     {
-        $doi     = ltrim($doi, '/');
-        $url     = 'https://doi.org/' . $doi;
+        $doi = ltrim($doi, '/');
+        $url = 'https://doi.org/' . $doi;
         return $this->checkUrlResolves($url);
     }
 }
