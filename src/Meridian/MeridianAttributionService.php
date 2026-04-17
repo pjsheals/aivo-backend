@@ -12,10 +12,13 @@ use Illuminate\Database\Capsule\Manager as DB;
  * First-party attribution for published atoms.
  * Generates tracked redirect URLs, logs clicks, returns stats.
  *
- * Link format: /r/{token}?km_source={source}&km_atom={atom_id}&km_filter={filter}
+ * Link format: /r/{token}
  *
  * All clicks stored in meridian_attribution_clicks.
  * All links stored in meridian_attribution_links.
+ *
+ * Stage 7 update: processClick() now fires a meridian_click event to the
+ * brand's configured GA4 property via MeridianGa4Service.
  */
 class MeridianAttributionService
 {
@@ -31,12 +34,11 @@ class MeridianAttributionService
         $brand = DB::table('meridian_brands')->find($atom->brand_id);
         if (!$brand) throw new \RuntimeException("Brand not found.");
 
-        // Generate unique token
         $token = $this->generateToken();
 
-        // Build the destination URL with km_ params
-        $separator   = str_contains($destination, '?') ? '&' : '?';
-        $trackedUrl  = $destination
+        // Build destination URL with km_ attribution params
+        $separator  = str_contains($destination, '?') ? '&' : '?';
+        $trackedUrl = $destination
             . $separator
             . http_build_query([
                 'km_source' => $options['source'] ?? 'meridian',
@@ -56,10 +58,10 @@ class MeridianAttributionService
             'agency_id'   => $agencyId,
             'destination' => $destination,
             'tracked_url' => $trackedUrl,
-            'source'      => $options['source']      ?? 'meridian',
-            'medium'      => $options['medium']      ?? 'atom',
-            'campaign'    => $options['campaign']    ?? $atom->filter_type,
-            'label'       => $options['label']       ?? $atom->atom_identifier,
+            'source'      => $options['source']   ?? 'meridian',
+            'medium'      => $options['medium']   ?? 'atom',
+            'campaign'    => $options['campaign'] ?? $atom->filter_type,
+            'label'       => $options['label']    ?? $atom->atom_identifier,
             'click_count' => 0,
             'created_at'  => now(),
             'updated_at'  => now(),
@@ -78,7 +80,7 @@ class MeridianAttributionService
     }
 
     // -------------------------------------------------------------------------
-    // Process a redirect click — log it and return the destination URL
+    // Process a redirect click — log + fire GA4 + redirect
     // -------------------------------------------------------------------------
 
     public function processClick(string $token, array $requestData = []): ?string
@@ -89,7 +91,7 @@ class MeridianAttributionService
 
         if (!$link) return null;
 
-        // Log the click
+        // Log the click to DB
         DB::table('meridian_attribution_clicks')->insert([
             'id'         => $this->uuid(),
             'link_id'    => $link->id,
@@ -108,6 +110,28 @@ class MeridianAttributionService
         DB::table('meridian_attribution_links')
             ->where('id', $link->id)
             ->increment('click_count');
+
+        // Fire GA4 meridian_click event if brand has GA4 configured
+        try {
+            $atom = DB::table('meridian_atoms')->where('id', $link->atom_id)->first();
+
+            (new MeridianGa4Service())->fireClickEvent(
+                (int)$link->brand_id,
+                (int)$link->agency_id,
+                [
+                    'atom_filter'      => $link->campaign ?? ($atom->filter_type ?? ''),
+                    'platform_variant' => $atom->model_variant ?? 'universal',
+                    'campaign'         => $link->campaign  ?? '',
+                    'brand_slug'       => $this->brandSlug($link->brand_id ? (DB::table('meridian_brands')->find($link->brand_id)?->name ?? '') : ''),
+                    'link_token'       => $token,
+                    'source'           => $link->source ?? 'meridian',
+                    'medium'           => $link->medium  ?? 'atom',
+                ]
+            );
+        } catch (\Throwable $e) {
+            // GA4 failure never blocks the redirect
+            log_error('[M7] GA4 event failed', ['error' => $e->getMessage(), 'token' => $token]);
+        }
 
         return $link->tracked_url;
     }
@@ -130,7 +154,6 @@ class MeridianAttributionService
         $linkStats   = [];
 
         foreach ($links as $link) {
-            // Get click breakdown by day (last 30 days)
             $dailyClicks = DB::table('meridian_attribution_clicks')
                 ->where('link_id', $link->id)
                 ->where('clicked_at', '>=', date('Y-m-d H:i:s', strtotime('-30 days')))
@@ -172,7 +195,7 @@ class MeridianAttributionService
 
     private function generateToken(): string
     {
-        return bin2hex(random_bytes(8)); // 16-char hex token
+        return bin2hex(random_bytes(8));
     }
 
     private function uuid(): string
