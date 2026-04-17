@@ -726,6 +726,9 @@ class MeridianSuperadminController
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )",
             "CREATE INDEX IF NOT EXISTS idx_mbp_brand_platform ON meridian_brand_packages(brand_id, platform)",
+
+            // Stage 6 (M8): Turn delta on reprobe results
+            "ALTER TABLE meridian_reprobe_results ADD COLUMN IF NOT EXISTS turn_delta_data JSONB",
         ];
 
         $results = [];
