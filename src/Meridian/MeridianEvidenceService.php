@@ -20,14 +20,16 @@ use Illuminate\Database\Capsule\Manager as DB;
 class MeridianEvidenceService
 {
     private const AUTHORITY_SCORES = [
-        'peer_reviewed'  => 4,
-        'regulatory'     => 4,
-        'clinical'       => 4,
-        'expert'         => 3,
-        'third_party'    => 3,
-        'press'          => 2,
-        'corporate'      => 1,
-        'self_published' => 1,
+        'peer_reviewed'   => 4,
+        'regulatory'      => 4,
+        'clinical'        => 4,
+        'expert'          => 3,
+        'third_party'     => 3,
+        'press'           => 2,
+        'video'           => 2,
+        'consumer_review' => 1,
+        'corporate'       => 1,
+        'self_published'  => 1,
     ];
 
     private const TIER1_DOMAINS = [
