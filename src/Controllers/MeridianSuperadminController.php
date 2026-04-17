@@ -23,6 +23,7 @@ use Aivo\Meridian\MeridianCorpusAnalyser;
  * GET  /api/meridian/admin/corpus               — Corpus contribution stats
  * GET  /api/meridian/admin/methodology          — Methodology versions
  * POST /api/meridian/admin/methodology/publish  — Publish new methodology version
+ * POST /api/meridian/admin/run-migration        — Run DB migrations against live DB
  */
 class MeridianSuperadminController
 {
@@ -331,20 +332,15 @@ class MeridianSuperadminController
             $month = date('m');
             $year  = date('Y');
 
-            // Agency counts
             $total     = DB::table('meridian_agencies')->whereNull('deleted_at')->count();
             $active    = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','active')->count();
             $trial     = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','trial')->count();
             $suspended = DB::table('meridian_agencies')->whereNull('deleted_at')->where('plan_status','suspended')->count();
+            $brands    = DB::table('meridian_brands')->whereNull('deleted_at')->count();
 
-            // Brand count
-            $brands = DB::table('meridian_brands')->whereNull('deleted_at')->count();
-
-            // Audit counts
             $auditsThisMonth = DB::table('meridian_audits')
                 ->whereMonth('created_at', $month)->whereYear('created_at', $year)->count();
 
-            // Audits by status this month
             $byStatus = DB::table('meridian_audits')
                 ->whereMonth('created_at', $month)->whereYear('created_at', $year)
                 ->select('status', DB::raw('COUNT(*) as count'))
@@ -353,7 +349,6 @@ class MeridianSuperadminController
                 ->map(fn($r) => ['status' => $r->status, 'count' => (int)$r->count])
                 ->toArray();
 
-            // Corpus totals
             $corpusTotal     = 0;
             $corpusThisMonth = 0;
             $corpusByPlatform = [];
@@ -368,11 +363,8 @@ class MeridianSuperadminController
                     ->get()
                     ->map(fn($r) => ['platform' => $r->platform ?? 'unknown', 'count' => (int)$r->count])
                     ->toArray();
-            } catch (\Throwable $_) {
-                // corpus table may be empty or not yet have data — fail gracefully
-            }
+            } catch (\Throwable $_) {}
 
-            // Agencies approaching limit (>= 80% of monthly audit allowance)
             $agenciesApproachingLimit = [];
             try {
                 $agencies = DB::table('meridian_agencies')
@@ -391,10 +383,10 @@ class MeridianSuperadminController
                     $pct = ($used / $ag->monthly_audit_allowance) * 100;
                     if ($pct >= 80) {
                         $agenciesApproachingLimit[] = [
-                            'name'                   => $ag->name,
-                            'audits_used'            => $used,
-                            'monthly_audit_allowance'=> (int)$ag->monthly_audit_allowance,
-                            'pct'                    => round($pct),
+                            'name'                    => $ag->name,
+                            'audits_used'             => $used,
+                            'monthly_audit_allowance' => (int)$ag->monthly_audit_allowance,
+                            'pct'                     => round($pct),
                         ];
                     }
                 }
@@ -441,15 +433,15 @@ class MeridianSuperadminController
             json_response([
                 'status' => 'ok', 'total' => $total, 'limit' => $limit, 'offset' => $offset,
                 'audits' => $audits->map(fn($a) => [
-                    'id'         => (int)$a->id,
-                    'status'     => $a->status,
-                    'auditType'  => $a->audit_type,
-                    'agencyName' => $a->agency_name,
-                    'brandName'  => $a->brand_name,
-                    'clientName' => $a->client_name,
-                    'createdAt'  => $a->created_at,
-                    'completedAt'=> $a->completed_at,
-                    'error'      => $a->error_message,
+                    'id'          => (int)$a->id,
+                    'status'      => $a->status,
+                    'auditType'   => $a->audit_type,
+                    'agencyName'  => $a->agency_name,
+                    'brandName'   => $a->brand_name,
+                    'clientName'  => $a->client_name,
+                    'createdAt'   => $a->created_at,
+                    'completedAt' => $a->completed_at,
+                    'error'       => $a->error_message,
                 ]),
             ]);
         } catch (\Throwable $e) {
@@ -487,7 +479,7 @@ class MeridianSuperadminController
     {
         $this->requireAdmin();
         try {
-            $total = 0;
+            $total      = 0;
             $byCategory = [];
             $byDitTurn  = [];
             $byPlatform = [];
@@ -497,34 +489,24 @@ class MeridianSuperadminController
 
                 $byCategory = DB::table('meridian_corpus_contributions')
                     ->select('category', DB::raw('COUNT(*) as count'))
-                    ->groupBy('category')
-                    ->orderByDesc('count')
-                    ->limit(20)
-                    ->get()
+                    ->groupBy('category')->orderByDesc('count')->limit(20)->get()
                     ->map(fn($r) => ['category' => $r->category ?? 'unknown', 'count' => (int)$r->count])
                     ->toArray();
 
                 $byDitTurn = DB::table('meridian_corpus_contributions')
                     ->select('dit_turn', DB::raw('COUNT(*) as count'))
-                    ->groupBy('dit_turn')
-                    ->orderBy('dit_turn')
-                    ->get()
+                    ->groupBy('dit_turn')->orderBy('dit_turn')->get()
                     ->map(fn($r) => ['dit_turn' => $r->dit_turn, 'count' => (int)$r->count])
                     ->toArray();
 
                 $byPlatform = DB::table('meridian_corpus_contributions')
                     ->select('platform', DB::raw('COUNT(*) as count'))
-                    ->groupBy('platform')
-                    ->orderByDesc('count')
-                    ->get()
+                    ->groupBy('platform')->orderByDesc('count')->get()
                     ->map(fn($r) => ['platform' => $r->platform ?? 'unknown', 'count' => (int)$r->count])
                     ->toArray();
 
-            } catch (\Throwable $_) {
-                // Corpus table may not have data yet — fail gracefully
-            }
+            } catch (\Throwable $_) {}
 
-            // Research findings
             $findings = [];
             try {
                 $findings = DB::table('meridian_research_findings')
@@ -564,8 +546,7 @@ class MeridianSuperadminController
         $this->requireAdmin();
         try {
             $deployments = DB::table('meridian_methodology_deployments')
-                ->orderBy('deployed_at','desc')
-                ->get();
+                ->orderBy('deployed_at','desc')->get();
             json_response([
                 'status'         => 'ok',
                 'currentVersion' => $deployments->first()->version ?? null,
@@ -608,10 +589,7 @@ class MeridianSuperadminController
         }
     }
 
-
     // ── GET /api/meridian/admin/model-watch ──────────────────────
-    // Returns platform status, recent alerts, and runs daily
-    // analysis lazily (once per day max).
     public function modelWatch(): void
     {
         $this->requireAdmin();
@@ -619,11 +597,9 @@ class MeridianSuperadminController
         try {
             $analyser = new \Aivo\Meridian\MeridianCorpusAnalyser();
 
-            // Run analysis if we haven't snapshotted today yet
             $today         = date('Y-m-d');
             $snapshotToday = DB::table('meridian_corpus_snapshots')
-                ->where('snapshot_date', $today)
-                ->exists();
+                ->where('snapshot_date', $today)->exists();
 
             $analysisResult = null;
             if (!$snapshotToday) {
@@ -632,19 +608,17 @@ class MeridianSuperadminController
 
             $alerts         = $analyser->getAlerts(50);
             $platformStatus = $analyser->getPlatformStatus();
-
-            $unackCount = DB::table('meridian_model_behaviour_alerts')
-                ->where('acknowledged', false)
-                ->count();
+            $unackCount     = DB::table('meridian_model_behaviour_alerts')
+                ->where('acknowledged', false)->count();
 
             json_response([
-                'status'          => 'ok',
-                'unacknowledged'  => (int)$unackCount,
-                'platform_status' => array_values($platformStatus),
-                'alerts'          => $alerts,
-                'analysis_ran'    => $analysisResult !== null,
-                'new_alerts'      => $analysisResult['alerts_fired'] ?? 0,
-                'last_checked'    => $today,
+                'status'         => 'ok',
+                'unacknowledged' => (int)$unackCount,
+                'platform_status'=> array_values($platformStatus),
+                'alerts'         => $alerts,
+                'analysis_ran'   => $analysisResult !== null,
+                'new_alerts'     => $analysisResult['alerts_fired'] ?? 0,
+                'last_checked'   => $today,
             ]);
 
         } catch (\Throwable $e) {
@@ -657,9 +631,9 @@ class MeridianSuperadminController
     // ── POST /api/meridian/admin/alerts/acknowledge ──────────────
     public function acknowledgeAlert(): void
     {
-        $admin    = $this->requireAdmin();
-        $body     = request_body();
-        $alertId  = (int)($body['alert_id'] ?? 0);
+        $admin   = $this->requireAdmin();
+        $body    = request_body();
+        $alertId = (int)($body['alert_id'] ?? 0);
 
         if (!$alertId) {
             http_response_code(422);
@@ -693,16 +667,13 @@ class MeridianSuperadminController
     }
 
     // ── POST /api/meridian/admin/model-watch/run ─────────────────
-    // Force a manual analysis run (ignores today's snapshot cache)
     public function runModelWatch(): void
     {
         $this->requireAdmin();
 
         try {
             $analyser = new \Aivo\Meridian\MeridianCorpusAnalyser();
-
-            // Force re-snapshot by deleting today's entries first
-            $today = date('Y-m-d');
+            $today    = date('Y-m-d');
             DB::table('meridian_corpus_snapshots')->where('snapshot_date', $today)->delete();
 
             $result = $analyser->runDailyAnalysis();
@@ -719,6 +690,38 @@ class MeridianSuperadminController
             http_response_code(500);
             json_response(['error' => 'Server error: ' . $e->getMessage()]);
         }
+    }
+
+    // ── POST /api/meridian/admin/run-migration ───────────────────
+    public function runMigration(): void
+    {
+        $secret = $_SERVER['HTTP_X_MERIDIAN_SECRET'] ?? '';
+        if ($secret !== env('MERIDIAN_INTERNAL_SECRET', 'aivo-admin-2026')) {
+            http_response_code(403);
+            json_response(['error' => 'Forbidden.']);
+            return;
+        }
+
+        $statements = [
+            "ALTER TABLE meridian_probe_runs ADD COLUMN IF NOT EXISTS probe_type VARCHAR(30)",
+            "ALTER TABLE meridian_probe_runs ADD COLUMN IF NOT EXISTS displacement_criteria TEXT",
+            "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS probe_type VARCHAR(30)",
+            "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS handoff_turn SMALLINT",
+            "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS survival_gap SMALLINT",
+            "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS displacement_criteria TEXT",
+        ];
+
+        $results = [];
+        foreach ($statements as $sql) {
+            try {
+                DB::statement($sql);
+                $results[] = ['sql' => $sql, 'status' => 'ok'];
+            } catch (\Throwable $e) {
+                $results[] = ['sql' => $sql, 'status' => 'error', 'error' => $e->getMessage()];
+            }
+        }
+
+        json_response(['success' => true, 'results' => $results]);
     }
 
     // ── Private helpers ──────────────────────────────────────────
