@@ -744,6 +744,38 @@ class MeridianSuperadminController
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(brand_id, agency_id)
             )",
+
+            // Stage 7 (Metering): Seed correct Boutique/Studio/Network/Enterprise plan definitions
+            // max_clients = NULL (no client cap at any tier — brand count is the only limit)
+            // monthly_audit_allowance = NULL (unlimited — brand cap is the constraint)
+            "INSERT INTO meridian_pricing_plans
+                (plan_type, display_name, max_clients, max_brands, max_users,
+                 monthly_audit_allowance, white_label_enabled, competitive_intel_enabled,
+                 ad_verification_enabled, api_access_enabled, auto_scheduling_enabled,
+                 benchmark_access_enabled, remediation_planner_enabled, monthly_price_gbp)
+             VALUES
+                ('fixed_starter', 'Boutique',  NULL, 15,   5,  NULL, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE,  995.00),
+                ('fixed_growth',  'Studio',    NULL, 40,   10, NULL, TRUE,  TRUE,  TRUE,  FALSE, FALSE, FALSE, TRUE,  2295.00),
+                ('fixed_agency',  'Network',   NULL, NULL, 25, NULL, TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  4495.00),
+                ('enterprise_metered', 'Enterprise', NULL, NULL, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, NULL)
+             ON CONFLICT (plan_type) DO UPDATE SET
+                display_name              = EXCLUDED.display_name,
+                max_clients               = EXCLUDED.max_clients,
+                max_brands                = EXCLUDED.max_brands,
+                max_users                 = EXCLUDED.max_users,
+                monthly_audit_allowance   = EXCLUDED.monthly_audit_allowance,
+                white_label_enabled       = EXCLUDED.white_label_enabled,
+                competitive_intel_enabled = EXCLUDED.competitive_intel_enabled,
+                ad_verification_enabled   = EXCLUDED.ad_verification_enabled,
+                api_access_enabled        = EXCLUDED.api_access_enabled,
+                auto_scheduling_enabled   = EXCLUDED.auto_scheduling_enabled,
+                benchmark_access_enabled  = EXCLUDED.benchmark_access_enabled,
+                remediation_planner_enabled = EXCLUDED.remediation_planner_enabled,
+                monthly_price_gbp         = EXCLUDED.monthly_price_gbp,
+                updated_at                = NOW()",
+
+            // Set max_clients = NULL on all existing agencies (no client cap)
+            "UPDATE meridian_agencies SET max_clients = NULL WHERE max_clients IS NOT NULL",
         ];
 
         $results = [];
