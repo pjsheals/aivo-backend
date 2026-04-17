@@ -186,6 +186,7 @@ $routes = [
         // ── Meridian: Atoms ────────────────────────────────────
         '/api/meridian/atoms/generate'         => [MeridianAtomController::class, 'generate'],
         '/api/meridian/atoms/generate-all'     => [MeridianAtomController::class, 'generateAll'],
+        '/api/meridian/atoms/approve'          => [MeridianAtomController::class, 'approve'],
         '/api/meridian/atoms/mark-published'   => [MeridianAtomController::class, 'markPublished'],
 
         // ── Meridian: Publication Pipeline ────────────────────
