@@ -43,6 +43,15 @@ class MeridianFilterClassifier
             throw new \RuntimeException("No transcript found for probe run {$probeRun->id}.");
         }
 
+        // Derive probe type from instrument and probe_mode
+        $probeType = $this->deriveProbeType($probeRun);
+
+        // Calculate survival gap — how many turns between displacement and handoff
+        $survivalGap = null;
+        if ($probeRun->handoff_turn !== null && $probeRun->dit_turn !== null) {
+            $survivalGap = (int)$probeRun->handoff_turn - (int)$probeRun->dit_turn;
+        }
+
         $classifierOutput = $this->callClassifierApi($transcript, $platform, $probeRun);
         $parsed           = $this->parseClassifierOutput($classifierOutput);
 
@@ -51,21 +60,75 @@ class MeridianFilterClassifier
             $platform
         );
 
-        $classificationId = $this->saveClassification($auditId, (int)$audit->brand_id, $platform, $probeRun, $parsed, $classifierOutput);
+        // Store probe_type and survival_gap into parsed for downstream use
+        $parsed['probe_type']    = $probeType;
+        $parsed['survival_gap']  = $survivalGap;
+        $parsed['handoff_turn']  = $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null;
+
+        // Update probe_run record with probe_type and displacement_criteria
+        DB::table('meridian_probe_runs')
+            ->where('id', $probeRun->id)
+            ->update([
+                'probe_type'            => $probeType,
+                'displacement_criteria' => $parsed['displacement_criteria'] ?? null,
+                'updated_at'            => now(),
+            ]);
+
+        $classificationId = $this->saveClassification(
+            $auditId,
+            (int)$audit->brand_id,
+            $platform,
+            $probeRun,
+            $parsed,
+            $classifierOutput,
+            $probeType,
+            $survivalGap
+        );
 
         return [
             'classification_id'      => $classificationId,
             'platform'               => $platform,
+            'probe_type'             => $probeType,
             'primary_filter'         => $parsed['primary_filter']        ?? null,
             'secondary_filters'      => $parsed['secondary_filters']     ?? [],
             'reasoning_stage'        => $parsed['reasoning_stage']       ?? null,
             'displacement_mechanism' => $parsed['displacement_mechanism'] ?? null,
+            'displacement_criteria'  => $parsed['displacement_criteria'] ?? null,
+            'displacement_turn'      => $probeRun->dit_turn     ? (int)$probeRun->dit_turn     : null,
+            'handoff_turn'           => $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null,
+            'survival_gap'           => $survivalGap,
+            'displacing_brand'       => $probeRun->t4_winner ?? null,
             'confidence'             => $parsed['confidence']             ?? 0,
             'evidence_gaps'          => $parsed['evidence_gaps']         ?? [],
             'evidence_briefs'        => $parsed['evidence_briefs']       ?? [],
             'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
             'reasoning_chain'        => $parsed['reasoning_chain']       ?? [],
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Derive probe type from probe run
+    // -------------------------------------------------------------------------
+
+    private function deriveProbeType(object $probeRun): string
+    {
+        $instrument = strtolower($probeRun->instrument ?? '');
+        $probeMode  = strtolower($probeRun->probe_mode ?? '');
+
+        if (str_contains($instrument, 'psos')) {
+            return 'awareness';
+        }
+        if ($probeMode === 'anchored') {
+            return 'decision_stage';
+        }
+        if ($probeMode === 'generic') {
+            return 'spontaneous_consideration';
+        }
+        // Default — undirected agentic probes without brand name = spontaneous
+        if (str_contains($instrument, 'undirected') || str_contains($instrument, 'u ')) {
+            return 'spontaneous_consideration';
+        }
+        return 'decision_stage';
     }
 
     // -------------------------------------------------------------------------
@@ -84,7 +147,7 @@ class MeridianFilterClassifier
         $text = '';
         foreach ($turns as $turn) {
             $t         = $turn->turn_number;
-            $isDit     = $turn->is_dit_turn    ? ' [DIT TURN]'     : '';
+            $isDit     = $turn->is_dit_turn     ? ' [DIT TURN]'     : '';
             $isHandoff = $turn->is_handoff_turn ? ' [HANDOFF TURN]' : '';
             $presence  = $turn->brand_presence  ? ' [Brand: ' . $turn->brand_presence . ']' : '';
 
@@ -98,7 +161,7 @@ class MeridianFilterClassifier
             }
 
             $text .= "=== TURN {$t}{$isDit}{$isHandoff}{$presence} ===\n";
-            $text .= "PROMPT: " . ($turn->user_prompt ?? '') . "\n";
+            $text .= "PROMPT: " . ($turn->user_prompt  ?? '') . "\n";
             $text .= "RESPONSE: " . ($turn->model_response ?? '');
             $text .= $citations . "\n\n";
         }
@@ -196,6 +259,14 @@ Fingerprint: {$fp['name']}
 Primary risk filters: {$fp['primary_risk']}
 Evidence priority: {$fp['evidence_priority']}
 
+## DISPLACEMENT CRITERIA
+The displacement_criteria field is critical. It must express — in one precise sentence — the specific question or criteria the model applied at the displacement turn that the brand failed to answer. This is not a description of the mechanism. It is the exact question that, if the brand had evidence to answer it, would have kept it in the conversation.
+
+Examples:
+- "Which anti-ageing moisturiser has peer-reviewed clinical proof of visible wrinkle reduction within 8 weeks?"
+- "Which product has dermatologist-endorsed retinol formulation with documented efficacy for women over 50?"
+- "Which brand has the most recent independently verified evidence of its core skincare claim?"
+
 ## OUTPUT FORMAT
 Return ONLY valid JSON. No preamble, no markdown.
 
@@ -204,9 +275,15 @@ Return ONLY valid JSON. No preamble, no markdown.
   "secondary_filters": ["T4"],
   "reasoning_stage": "T3",
   "displacement_mechanism": "One sentence describing exactly how displacement occurred.",
+  "displacement_criteria": "The specific criteria-based question the model applied at the displacement turn that the brand failed to answer.",
   "confidence": 87,
   "evidence_gaps": [
-    { "filter": "T1", "field": "clinical_backing", "gap": "Specific description of what is missing." }
+    {
+      "filter": "T1",
+      "field": "clinical_backing",
+      "gap": "Specific description of what is missing.",
+      "probe_type_relevance": "decision_stage"
+    }
   ],
   "brand_story_frame": "clinical_authority",
   "reasoning_chain": [
@@ -221,24 +298,39 @@ PROMPT;
 
     private function buildUserMessage(string $transcript, object $probeRun): string
     {
-        $ditTurn  = $probeRun->dit_turn        ?? 'unknown';
-        $t4Winner = $probeRun->t4_winner       ?? 'unknown';
-        $turns    = $probeRun->turns_completed  ?? 'unknown';
-        $termType = $probeRun->termination_type ?? 'unknown';
+        $ditTurn     = $probeRun->dit_turn        ?? 'null (no displacement)';
+        $handoffTurn = $probeRun->handoff_turn    ?? 'unknown';
+        $t4Winner    = $probeRun->t4_winner       ?? 'unknown';
+        $turns       = $probeRun->turns_completed ?? 'unknown';
+        $termType    = $probeRun->termination_type ?? 'unknown';
+        $probeMode   = $probeRun->probe_mode       ?? 'unknown';
+
+        $survivalGap = 'N/A';
+        if ($probeRun->handoff_turn !== null && $probeRun->dit_turn !== null) {
+            $survivalGap = ((int)$probeRun->handoff_turn - (int)$probeRun->dit_turn) . ' turns of revenue exposure';
+        }
 
         return <<<MSG
 ## PROBE METADATA
 Platform: {$probeRun->platform}
+Probe mode: {$probeMode}
 Turns completed: {$turns}
 DIT turn (displacement initiation): {$ditTurn}
-T4 winner (final recommendation): {$t4Winner}
+Commercial handoff turn: {$handoffTurn}
+Survival gap: {$survivalGap}
+Brand at handoff / T4 winner: {$t4Winner}
 Termination type: {$termType}
 
 ## TRANSCRIPT
 {$transcript}
 
 ## TASK
-Read the transcript carefully. Identify the primary filter causing displacement. Return the JSON classification only.
+Read the transcript carefully. Identify:
+1. The primary filter causing displacement
+2. The exact displacement_criteria — the specific question the model applied at the DIT turn that the brand failed to answer
+3. All evidence gaps needed to survive from the DIT turn to the commercial handoff turn
+
+Return the JSON classification only.
 MSG;
     }
 
@@ -283,9 +375,9 @@ MSG;
     {
         $briefs = [];
         foreach ($gaps as $gap) {
-            $filter  = $gap['filter'] ?? 'unknown';
-            $field   = $gap['field']  ?? 'unknown';
-            $gapDesc = $gap['gap']    ?? '';
+            $filter  = $gap['filter']  ?? 'unknown';
+            $field   = $gap['field']   ?? 'unknown';
+            $gapDesc = $gap['gap']     ?? '';
             $briefs[] = [
                 'filter'   => $filter,
                 'field'    => $field,
@@ -333,21 +425,33 @@ MSG;
         string $platform,
         object $probeRun,
         array  $parsed,
-        array  $rawOutput
+        array  $rawOutput,
+        string $probeType,
+        ?int   $survivalGap
     ): string {
-        $id = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x', mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000, mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff));
+        $id = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+        );
 
         DB::table('meridian_filter_classifications')->insert([
             'id'                     => $id,
             'audit_id'               => $auditId,
             'brand_id'               => $brandId,
             'platform'               => $platform,
-            'dit_turn'               => $probeRun->dit_turn   ?? null,
-            't4_winner'              => $probeRun->t4_winner  ?? null,
+            'probe_type'             => $probeType,
+            'dit_turn'               => $probeRun->dit_turn    ?? null,
+            'handoff_turn'           => $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null,
+            'survival_gap'           => $survivalGap,
+            't4_winner'              => $probeRun->t4_winner   ?? null,
             'primary_filter'         => $parsed['primary_filter']        ?? null,
             'secondary_filters'      => json_encode($parsed['secondary_filters']  ?? []),
             'reasoning_stage'        => $parsed['reasoning_stage']       ?? null,
             'displacement_mechanism' => $parsed['displacement_mechanism'] ?? null,
+            'displacement_criteria'  => $parsed['displacement_criteria'] ?? null,
             'evidence_gaps'          => json_encode($parsed['evidence_gaps']       ?? []),
             'evidence_briefs'        => json_encode($parsed['evidence_briefs']     ?? []),
             'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
