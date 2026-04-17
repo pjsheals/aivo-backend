@@ -169,6 +169,7 @@ $routes = [
         '/api/meridian/admin/methodology/publish'    => [MeridianSuperadminController::class, 'publishMethodology'],
         '/api/meridian/admin/alerts/acknowledge'     => [MeridianSuperadminController::class, 'acknowledgeAlert'],
         '/api/meridian/admin/model-watch/run'        => [MeridianSuperadminController::class, 'runModelWatch'],
+        '/api/meridian/admin/run-migration'          => [MeridianSuperadminController::class, 'runMigration'],
 
         // ── Meridian: Filter Classifier ────────────────────────
         '/api/meridian/classify'            => [MeridianClassifierController::class, 'classify'],
