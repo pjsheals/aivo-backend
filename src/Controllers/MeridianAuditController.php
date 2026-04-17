@@ -89,6 +89,29 @@ class MeridianAuditController
             return;
         }
 
+        // ── Enforce monthly audit allowance ───────────────────────
+        // Boutique=NULL, Studio=NULL, Network=NULL (unlimited at all tiers currently).
+        // This check activates automatically if allowance is set on the agency row.
+        $monthlyAllowance = $auth->agency->monthly_audit_allowance ?? null;
+        if ($monthlyAllowance !== null) {
+            $auditsThisMonth = DB::table('meridian_audits')
+                ->where('agency_id', $auth->agency_id)
+                ->whereNotIn('status', ['cancelled'])
+                ->whereRaw("DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())")
+                ->count();
+
+            if ($auditsThisMonth >= (int)$monthlyAllowance) {
+                http_response_code(403);
+                json_response([
+                    'error'       => 'Monthly audit allowance reached for your plan.',
+                    'allowance'   => (int)$monthlyAllowance,
+                    'used'        => $auditsThisMonth,
+                    'resets_at'   => date('Y-m-01', strtotime('first day of next month')),
+                ]);
+                return;
+            }
+        }
+
         // ── Resolve instrument type ───────────────────────────────
         $instrumentType   = trim($body['instrument_type'] ?? $auditType ?? 'directed_bjp');
         $undirectedConfig = $body['undirected_config'] ?? [];
