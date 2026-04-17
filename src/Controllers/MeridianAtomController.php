@@ -19,8 +19,8 @@ class MeridianAtomController
         $auth = MeridianAuth::require();
         $body = request_body();
 
-        $brandId      = isset($body['brand_id'])     ? (int)$body['brand_id']              : null;
-        $auditId      = isset($body['audit_id'])      ? (int)$body['audit_id']              : null;
+        $brandId      = isset($body['brand_id'])     ? (int)$body['brand_id']                : null;
+        $auditId      = isset($body['audit_id'])      ? (int)$body['audit_id']                : null;
         $filterType   = isset($body['filter_type'])   ? strtoupper(trim($body['filter_type'])) : null;
         $modelVariant = isset($body['model_variant']) ? strtolower(trim($body['model_variant'])) : 'universal';
 
@@ -42,7 +42,6 @@ class MeridianAtomController
             return;
         }
 
-        // Confirm brand belongs to this agency
         $brand = DB::table('meridian_brands')
             ->where('id', $brandId)
             ->where('agency_id', $auth->agency_id)
@@ -74,7 +73,6 @@ class MeridianAtomController
     /**
      * POST /api/meridian/atoms/generate-all
      * Body: { brand_id, audit_id, filter_type }
-     * Generates all four model variants for one filter gap.
      */
     public function generateAll(): void
     {
@@ -117,11 +115,79 @@ class MeridianAtomController
     }
 
     /**
+     * POST /api/meridian/atoms/approve
+     * Body: { atom_id, action: "approve"|"reject", notes? }
+     *
+     * Approval gate — agency reviews atom content before publication.
+     * approve → status = 'validated', approval_status = 'approved'
+     * reject  → status = 'draft',     approval_status = 'rejected'
+     */
+    public function approve(): void
+    {
+        $auth = MeridianAuth::require();
+        $body = request_body();
+
+        $atomId = $body['atom_id'] ?? null;
+        $action = strtolower(trim($body['action'] ?? ''));
+        $notes  = trim($body['notes'] ?? '');
+
+        if (!$atomId) {
+            http_response_code(400);
+            json_response(['error' => 'atom_id is required.']);
+            return;
+        }
+
+        if (!in_array($action, ['approve', 'reject'], true)) {
+            http_response_code(400);
+            json_response(['error' => 'action must be approve or reject.']);
+            return;
+        }
+
+        $atom = DB::table('meridian_atoms')
+            ->where('id', $atomId)
+            ->where('agency_id', $auth->agency_id)
+            ->first();
+
+        if (!$atom) {
+            http_response_code(403);
+            json_response(['error' => 'Atom not found or access denied.']);
+            return;
+        }
+
+        if (($atom->approval_status ?? '') === 'approved') {
+            http_response_code(409);
+            json_response(['error' => 'Atom is already approved.']);
+            return;
+        }
+
+        $newStatus         = $action === 'approve' ? 'validated' : 'draft';
+        $newApprovalStatus = $action === 'approve' ? 'approved'  : 'rejected';
+
+        DB::table('meridian_atoms')
+            ->where('id', $atomId)
+            ->update([
+                'status'          => $newStatus,
+                'approval_status' => $newApprovalStatus,
+                'approval_notes'  => $notes ?: null,
+                'approved_at'     => $action === 'approve' ? now() : null,
+                'approved_by'     => $action === 'approve' ? $auth->user_id : null,
+                'updated_at'      => now(),
+            ]);
+
+        json_response([
+            'success' => true,
+            'data'    => [
+                'atom_id'         => $atomId,
+                'action'          => $action,
+                'status'          => $newStatus,
+                'approval_status' => $newApprovalStatus,
+            ],
+        ]);
+    }
+
+    /**
      * POST /api/meridian/atoms/mark-published
      * Body: { "atom_id": "uuid" }
-     *
-     * Forces atom status to published. Used when publication jobs completed
-     * but checkAndMarkPublished was blocked by stale failed/retrying jobs.
      */
     public function markPublished(): void
     {
@@ -156,7 +222,7 @@ class MeridianAtomController
 
     /**
      * GET /api/meridian/atoms?brand_id=1&audit_id=26
-     * Returns all atoms grouped by filter_type and model_variant.
+     * Returns atoms split into pending (needs review) and approved.
      */
     public function list(): void
     {
@@ -191,32 +257,49 @@ class MeridianAtomController
 
         $rows = $query->get();
 
-        // Group by filter_type
-        $grouped = [];
+        $pending  = [];
+        $approved = [];
+
         foreach ($rows as $row) {
-            $filter = $row->filter_type;
-            if (!isset($grouped[$filter])) $grouped[$filter] = [];
-            $grouped[$filter][] = [
-                'id'               => $row->id,
-                'atom_identifier'  => $row->atom_identifier,
-                'filter_type'      => $row->filter_type,
-                'model_variant'    => $row->model_variant,
-                'reasoning_stage'  => $row->reasoning_stage,
-                'entity'           => $row->entity,
-                'claim'            => $row->claim,
-                'validation_score' => $row->validation_score,
-                'status'           => $row->status,
-                'zenodo_doi'       => $row->zenodo_doi,
-                'created_at'       => $row->created_at,
+            $item = [
+                'id'                    => $row->id,
+                'atom_identifier'       => $row->atom_identifier,
+                'filter_type'           => $row->filter_type,
+                'model_variant'         => $row->model_variant,
+                'probe_type'            => $row->probe_type            ?? 'decision_stage',
+                'reasoning_stage'       => $row->reasoning_stage,
+                'entity'                => $row->entity,
+                'claim'                 => $row->claim,
+                'conversational_query'  => $row->conversational_query,
+                'conversational_answer' => $row->conversational_answer,
+                'validation_score'      => $row->validation_score,
+                'status'                => $row->status,
+                'approval_status'       => $row->approval_status      ?? 'pending_approval',
+                'approval_notes'        => $row->approval_notes       ?? null,
+                'zenodo_doi'            => $row->zenodo_doi,
+                'created_at'            => $row->created_at,
             ];
+
+            if (($row->approval_status ?? 'pending_approval') === 'pending_approval') {
+                $pending[] = $item;
+            } else {
+                $approved[] = $item;
+            }
         }
 
-        json_response(['success' => true, 'data' => $grouped]);
+        json_response([
+            'success' => true,
+            'data'    => [
+                'pending_count'  => count($pending),
+                'approved_count' => count($approved),
+                'pending'        => $pending,
+                'approved'       => $approved,
+            ],
+        ]);
     }
 
     /**
      * GET /api/meridian/atoms/detail?id={uuid}
-     * Returns full atom including raw_atom JSON.
      */
     public function detail(): void
     {
@@ -237,7 +320,6 @@ class MeridianAtomController
             return;
         }
 
-        // Confirm brand belongs to this agency
         $brand = DB::table('meridian_brands')
             ->where('id', $atom->brand_id)
             ->where('agency_id', $auth->agency_id)
@@ -256,19 +338,22 @@ class MeridianAtomController
                 'atom_identifier'       => $atom->atom_identifier,
                 'filter_type'           => $atom->filter_type,
                 'model_variant'         => $atom->model_variant,
+                'probe_type'            => $atom->probe_type            ?? 'decision_stage',
                 'reasoning_stage'       => $atom->reasoning_stage,
                 'entity'                => $atom->entity,
                 'claim'                 => $atom->claim,
                 'conversational_query'  => $atom->conversational_query,
                 'conversational_answer' => $atom->conversational_answer,
-                'citations'             => json_decode($atom->citations     ?? '[]', true),
-                'attributes'            => json_decode($atom->attributes    ?? '[]', true),
+                'citations'             => json_decode($atom->citations       ?? '[]', true),
+                'attributes'            => json_decode($atom->attributes      ?? '[]', true),
                 'trust_tier'            => $atom->trust_tier,
                 'related_queries'       => json_decode($atom->related_queries ?? '[]', true),
                 'validation_score'      => $atom->validation_score,
                 'validation_notes'      => $atom->validation_notes,
                 'status'                => $atom->status,
-                'raw_atom'              => json_decode($atom->raw_atom ?? '{}', true),
+                'approval_status'       => $atom->approval_status       ?? 'pending_approval',
+                'approval_notes'        => $atom->approval_notes        ?? null,
+                'raw_atom'              => json_decode($atom->raw_atom   ?? '{}', true),
                 'zenodo_doi'            => $atom->zenodo_doi,
                 'created_at'            => $atom->created_at,
             ],
