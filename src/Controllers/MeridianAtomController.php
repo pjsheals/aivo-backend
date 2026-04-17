@@ -6,6 +6,7 @@ namespace Aivo\Controllers;
 
 use Aivo\Meridian\MeridianAuth;
 use Aivo\Meridian\MeridianAtomGenerator;
+use Aivo\Meridian\MeridianBrandPackageGenerator;
 use Illuminate\Database\Capsule\Manager as DB;
 
 class MeridianAtomController
@@ -121,6 +122,8 @@ class MeridianAtomController
      * Approval gate — agency reviews atom content before publication.
      * approve → status = 'validated', approval_status = 'approved'
      * reject  → status = 'draft',     approval_status = 'rejected'
+     *
+     * On approve: M9 auto-regen fires silently to rebuild all platform packages.
      */
     public function approve(): void
     {
@@ -183,6 +186,29 @@ class MeridianAtomController
                 'approval_status' => $newApprovalStatus,
             ],
         ]);
+
+        // M9 auto-regen — silently rebuild all platform packages when an atom is approved.
+        // Uses the latest completed audit for this brand. Failure is logged but never surfaces to the caller.
+        if ($action === 'approve') {
+            try {
+                $latestAudit = DB::table('meridian_audits')
+                    ->where('brand_id', $atom->brand_id)
+                    ->where('agency_id', $auth->agency_id)
+                    ->whereNotNull('completed_at')
+                    ->orderByDesc('completed_at')
+                    ->first();
+
+                if ($latestAudit) {
+                    (new MeridianBrandPackageGenerator())->generate(
+                        (int)$atom->brand_id,
+                        (int)$latestAudit->id,
+                        (int)$auth->agency_id
+                    );
+                }
+            } catch (\Throwable $e) {
+                log_error('[M9] Auto-regen after atom approval failed', ['error' => $e->getMessage()]);
+            }
+        }
     }
 
     /**
