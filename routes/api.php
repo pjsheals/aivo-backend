@@ -30,6 +30,7 @@ use Aivo\Controllers\MeridianCrawlerController;
 use Aivo\Controllers\MeridianAttributionController;
 use Aivo\Controllers\MeridianReprobeController;
 use Aivo\Controllers\MeridianPackageController;
+use Aivo\Controllers\MeridianGa4Controller;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -104,6 +105,9 @@ $routes = [
         // ── Meridian: Brand Intelligence Packages (M9) ────────
         '/api/meridian/package/status'         => [MeridianPackageController::class, 'status'],
         '/api/meridian/package/download'       => [MeridianPackageController::class, 'download'],
+
+        // ── Meridian: GA4 config ───────────────────────────────
+        '/api/meridian/ga4/config'             => [MeridianGa4Controller::class, 'get'],
 
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/stats'      => [MeridianAttributionController::class, 'stats'],
@@ -204,6 +208,10 @@ $routes = [
 
         // ── Meridian: Brand Intelligence Packages (M9) ────────
         '/api/meridian/package/generate'       => [MeridianPackageController::class, 'generate'],
+
+        // ── Meridian: GA4 config ───────────────────────────────
+        '/api/meridian/ga4/config/save'        => [MeridianGa4Controller::class, 'save'],
+        '/api/meridian/ga4/config/test'        => [MeridianGa4Controller::class, 'test'],
 
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/link'       => [MeridianAttributionController::class, 'createLink'],
