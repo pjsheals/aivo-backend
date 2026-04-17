@@ -729,6 +729,21 @@ class MeridianSuperadminController
 
             // Stage 6 (M8): Turn delta on reprobe results
             "ALTER TABLE meridian_reprobe_results ADD COLUMN IF NOT EXISTS turn_delta_data JSONB",
+
+            // Stage 7 (GA4): Brand GA4 Measurement Protocol config
+            "CREATE TABLE IF NOT EXISTS meridian_ga4_configs (
+                id BIGSERIAL PRIMARY KEY,
+                brand_id BIGINT NOT NULL,
+                agency_id BIGINT NOT NULL,
+                measurement_id VARCHAR(50) NOT NULL,
+                api_secret TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                last_tested_at TIMESTAMPTZ,
+                last_test_status VARCHAR(20),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(brand_id, agency_id)
+            )",
         ];
 
         $results = [];
