@@ -139,7 +139,7 @@ class MeridianSuperadminController
             $slug = $this->generateSlug($agencyName);
 
             $agencyId = DB::table('meridian_agencies')->insertGetId([
-                'deployment_id'           => 1,
+                // deployment_id removed — no foreign key dependency
                 'name'                    => $agencyName,
                 'slug'                    => $slug,
                 'contact_email'           => $contactEmail ?: $userEmail,
@@ -225,10 +225,10 @@ class MeridianSuperadminController
                     'customDomain' => $agency->custom_domain,
                     'createdAt'    => $agency->created_at,
                     'limits' => [
-                        'maxClients'            => (int)$agency->max_clients,
-                        'maxBrands'             => (int)$agency->max_brands,
-                        'maxUsers'              => (int)$agency->max_users,
-                        'monthlyAuditAllowance' => (int)$agency->monthly_audit_allowance,
+                        'maxClients'            => $agency->max_clients !== null ? (int)$agency->max_clients : null,
+                        'maxBrands'             => $agency->max_brands !== null ? (int)$agency->max_brands : null,
+                        'maxUsers'              => $agency->max_users !== null ? (int)$agency->max_users : null,
+                        'monthlyAuditAllowance' => $agency->monthly_audit_allowance !== null ? (int)$agency->monthly_audit_allowance : null,
                     ],
                     'usage' => [
                         'clients'         => DB::table('meridian_clients')->where('agency_id',$id)->whereNull('deleted_at')->count(),
