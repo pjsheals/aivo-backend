@@ -29,6 +29,7 @@ use Aivo\Controllers\MeridianPublicationController;
 use Aivo\Controllers\MeridianCrawlerController;
 use Aivo\Controllers\MeridianAttributionController;
 use Aivo\Controllers\MeridianReprobeController;
+use Aivo\Controllers\MeridianPackageController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -99,6 +100,10 @@ $routes = [
 
         // ── Meridian: Crawler Instructions ────────────────────
         '/api/meridian/crawler'                => [MeridianCrawlerController::class, 'get'],
+
+        // ── Meridian: Brand Intelligence Packages (M9) ────────
+        '/api/meridian/package/status'         => [MeridianPackageController::class, 'status'],
+        '/api/meridian/package/download'       => [MeridianPackageController::class, 'download'],
 
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/stats'      => [MeridianAttributionController::class, 'stats'],
@@ -196,6 +201,9 @@ $routes = [
 
         // ── Meridian: Crawler Instructions ────────────────────
         '/api/meridian/crawler/generate'       => [MeridianCrawlerController::class, 'generate'],
+
+        // ── Meridian: Brand Intelligence Packages (M9) ────────
+        '/api/meridian/package/generate'       => [MeridianPackageController::class, 'generate'],
 
         // ── Meridian: Attribution ──────────────────────────────
         '/api/meridian/attribution/link'       => [MeridianAttributionController::class, 'createLink'],
