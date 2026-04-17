@@ -13,8 +13,6 @@ class MeridianAttributionController
     /**
      * POST /api/meridian/attribution/link
      * Body: { "atom_id": "uuid", "destination": "https://...", "source": "optional", "medium": "optional", "campaign": "optional" }
-     *
-     * Creates a tracked redirect link for a published atom.
      */
     public function createLink(): void
     {
@@ -30,14 +28,12 @@ class MeridianAttributionController
             return;
         }
 
-        // Validate destination is a URL
         if (!filter_var($destination, FILTER_VALIDATE_URL)) {
             http_response_code(400);
             json_response(['error' => 'destination must be a valid URL.']);
             return;
         }
 
-        // Confirm atom belongs to this agency
         $atom = DB::table('meridian_atoms')
             ->where('id', $atomId)
             ->where('agency_id', $auth->agency_id)
@@ -68,9 +64,43 @@ class MeridianAttributionController
     }
 
     /**
+     * POST /api/meridian/attribution/link/delete
+     * Body: { "link_id": "uuid" }
+     */
+    public function deleteLink(): void
+    {
+        $auth = MeridianAuth::require();
+        $body = request_body();
+
+        $linkId = $body['link_id'] ?? null;
+
+        if (!$linkId) {
+            http_response_code(400);
+            json_response(['error' => 'link_id is required.']);
+            return;
+        }
+
+        try {
+            $service = new MeridianAttributionService();
+            $deleted = $service->deleteLink($linkId, (int)$auth->agency_id);
+
+            if (!$deleted) {
+                http_response_code(404);
+                json_response(['error' => 'Link not found or access denied.']);
+                return;
+            }
+
+            json_response(['success' => true, 'data' => ['link_id' => $linkId]]);
+
+        } catch (\Throwable $e) {
+            log_error('[M7] deleteLink error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['success' => false, 'error' => 'Internal server error.']);
+        }
+    }
+
+    /**
      * GET /api/meridian/attribution/stats?brand_id=X&atom_id=Y(optional)
-     *
-     * Returns click stats for a brand or specific atom.
      */
     public function stats(): void
     {
@@ -84,7 +114,6 @@ class MeridianAttributionController
             return;
         }
 
-        // Confirm brand belongs to this agency
         $brand = DB::table('meridian_brands')
             ->where('id', $brandId)
             ->where('agency_id', $auth->agency_id)
@@ -105,13 +134,12 @@ class MeridianAttributionController
     /**
      * GET /r/{token}
      *
-     * Public redirect endpoint. Logs the click and redirects to destination.
-     * No auth required — this is a public URL embedded in published atoms.
+     * Public redirect endpoint. No auth required.
      */
     public function redirect(): void
     {
         $uri   = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-        $token = basename($uri); // Extract token from /r/{token}
+        $token = basename($uri);
 
         if (!$token) {
             http_response_code(400);
@@ -121,9 +149,9 @@ class MeridianAttributionController
 
         $service     = new MeridianAttributionService();
         $destination = $service->processClick($token, [
-            'ip'         => $_SERVER['REMOTE_ADDR']          ?? '',
-            'user_agent' => $_SERVER['HTTP_USER_AGENT']       ?? '',
-            'referrer'   => $_SERVER['HTTP_REFERER']          ?? '',
+            'ip'         => $_SERVER['REMOTE_ADDR']    ?? '',
+            'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+            'referrer'   => $_SERVER['HTTP_REFERER']    ?? '',
         ]);
 
         if (!$destination) {
