@@ -137,6 +137,26 @@ class MeridianAttributionService
     }
 
     // -------------------------------------------------------------------------
+    // Delete a tracked link
+    // -------------------------------------------------------------------------
+
+    public function deleteLink(string $linkId, int $agencyId): bool
+    {
+        $link = DB::table('meridian_attribution_links')
+            ->where('id', $linkId)
+            ->where('agency_id', $agencyId)
+            ->first();
+
+        if (!$link) return false;
+
+        DB::table('meridian_attribution_links')
+            ->where('id', $linkId)
+            ->delete();
+
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
     // Stats for a brand or atom
     // -------------------------------------------------------------------------
 
