@@ -698,6 +698,7 @@ class MeridianSuperadminController
         $this->requireAdmin();
 
         $statements = [
+            // Stage 1–3: existing column additions
             "ALTER TABLE meridian_probe_runs ADD COLUMN IF NOT EXISTS probe_type VARCHAR(30)",
             "ALTER TABLE meridian_probe_runs ADD COLUMN IF NOT EXISTS displacement_criteria TEXT",
             "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS probe_type VARCHAR(30)",
@@ -709,15 +710,31 @@ class MeridianSuperadminController
             "ALTER TABLE meridian_atoms ADD COLUMN IF NOT EXISTS approval_notes TEXT",
             "ALTER TABLE meridian_atoms ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
             "ALTER TABLE meridian_atoms ADD COLUMN IF NOT EXISTS approved_by INTEGER",
+
+            // Stage 4 (M9): Brand Intelligence Packages table
+            "CREATE TABLE IF NOT EXISTS meridian_brand_packages (
+                id BIGSERIAL PRIMARY KEY,
+                brand_id BIGINT NOT NULL,
+                agency_id BIGINT NOT NULL,
+                platform VARCHAR(20) NOT NULL,
+                file_content JSONB NOT NULL,
+                atom_count SMALLINT DEFAULT 0,
+                evidence_count SMALLINT DEFAULT 0,
+                generated_at TIMESTAMPTZ DEFAULT NOW(),
+                version VARCHAR(10) DEFAULT '1.0',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_mbp_brand_platform ON meridian_brand_packages(brand_id, platform)",
         ];
 
         $results = [];
         foreach ($statements as $sql) {
             try {
                 DB::statement($sql);
-                $results[] = ['sql' => $sql, 'status' => 'ok'];
+                $results[] = ['sql' => substr($sql, 0, 80), 'status' => 'ok'];
             } catch (\Throwable $e) {
-                $results[] = ['sql' => $sql, 'status' => 'error', 'error' => $e->getMessage()];
+                $results[] = ['sql' => substr($sql, 0, 80), 'status' => 'error', 'error' => $e->getMessage()];
             }
         }
 
