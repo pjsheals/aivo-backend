@@ -365,25 +365,25 @@ MSG;
         array  $atom,
         array  $validation
     ): string {
-        $id = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
-            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0x0fff) | 0x4000,
-            mt_rand(0, 0x3fff) | 0x8000,
-            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
-        );
-
-        // Remove existing atom for same brand/audit/filter/variant
-        DB::table('meridian_atoms')
+        // Check if an atom already exists for this brand/filter/variant (any audit)
+        $existing = DB::table('meridian_atoms')
             ->where('brand_id', $brandId)
-            ->where('audit_id', $auditId)
             ->where('filter_type', $filterType)
             ->where('model_variant', $modelVariant)
-            ->delete();
+            ->orderByDesc('created_at')
+            ->first();
 
-        DB::table('meridian_atoms')->insert([
-            'id'                    => $id,
-            'brand_id'              => $brandId,
+        $id = $existing
+            ? $existing->id
+            : sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+                mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+                mt_rand(0, 0xffff),
+                mt_rand(0, 0x0fff) | 0x4000,
+                mt_rand(0, 0x3fff) | 0x8000,
+                mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+            );
+
+        $data = [
             'audit_id'              => $auditId,
             'agency_id'             => $agencyId,
             'atom_identifier'       => $atom['id']                ?? null,
@@ -405,9 +405,17 @@ MSG;
             'status'                => 'generated',
             'approval_status'       => 'pending_approval',
             'raw_atom'              => json_encode($atom),
-            'created_at'            => now(),
             'updated_at'            => now(),
-        ]);
+        ];
+
+        if ($existing) {
+            DB::table('meridian_atoms')->where('id', $id)->update($data);
+        } else {
+            $data['id']         = $id;
+            $data['brand_id']   = $brandId;
+            $data['created_at'] = now();
+            DB::table('meridian_atoms')->insert($data);
+        }
 
         return $id;
     }
