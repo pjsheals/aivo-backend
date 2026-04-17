@@ -11,16 +11,11 @@ use Illuminate\Database\Capsule\Manager as DB;
  *
  * Generates MAS 1.1 Micro-Content Atoms from verified evidence submissions.
  * One atom per filter gap per model variant.
- * Uses Claude API with the MAS 1.1 schema as the output template.
  *
- * Reads from:
- *   - meridian_brands
- *   - meridian_filter_classifications (M1)
- *   - meridian_evidence_submissions (M3) — verified only
- *   - meridian_probe_runs
- *
- * Writes to:
- *   - meridian_atoms
+ * Stage 3 changes:
+ * - Inherits probe_type from M1 classification (awareness / decision_stage / spontaneous_consideration)
+ * - All new atoms set to approval_status = 'pending_approval'
+ * - Status = 'generated' until explicitly approved via /api/meridian/atoms/approve
  */
 class MeridianAtomGenerator
 {
@@ -70,17 +65,21 @@ class MeridianAtomGenerator
             throw new \RuntimeException("No verified evidence found for filter {$filterType}. Submit and verify evidence first.");
         }
 
-        // Load M1 classification for context
+        // Load M1 classification for context + probe_type
+        $classificationPlatform = $modelVariant === 'universal' ? 'gemini' : $modelVariant;
         $classification = DB::table('meridian_filter_classifications')
             ->where('audit_id', $auditId)
-            ->where('platform', $modelVariant === 'universal' ? 'gemini' : $modelVariant)
+            ->where('platform', $classificationPlatform)
             ->orderByDesc('created_at')
             ->first();
+
+        // Inherit probe_type from classification — fallback to decision_stage
+        $probeType = $classification->probe_type ?? 'decision_stage';
 
         // Load probe run for DIT/T4 winner context
         $probeRun = DB::table('meridian_probe_runs')
             ->where('audit_id', $auditId)
-            ->where('platform', $modelVariant === 'universal' ? 'gemini' : $modelVariant)
+            ->where('platform', $classificationPlatform)
             ->where('status', 'completed')
             ->orderByDesc('completed_at')
             ->first();
@@ -91,16 +90,22 @@ class MeridianAtomGenerator
         // Validate the atom
         $validation = $this->validateAtom($atomJson, $filterType, $modelVariant);
 
-        // Save to database
-        $id = $this->saveAtom($brandId, $auditId, (int)$audit->agency_id, $filterType, $modelVariant, $atomJson, $validation);
+        // Save to database — all new atoms go to pending_approval
+        $id = $this->saveAtom(
+            $brandId, $auditId, (int)$audit->agency_id,
+            $filterType, $modelVariant, $probeType,
+            $atomJson, $validation
+        );
 
         return [
             'atom_id'          => $id,
             'filter_type'      => $filterType,
             'model_variant'    => $modelVariant,
+            'probe_type'       => $probeType,
+            'approval_status'  => 'pending_approval',
             'validation_score' => $validation['score'],
             'validation_notes' => $validation['notes'],
-            'status'           => $validation['score'] >= 70 ? 'validated' : 'draft',
+            'status'           => 'generated',
             'atom'             => $atomJson,
         ];
     }
@@ -257,10 +262,9 @@ PROMPT;
         ?object $probeRun
     ): string {
         $brandName = $brand->name;
-        $category  = $brand->category  ?? 'product';
-        $website   = $brand->website   ?? null;
+        $category  = $brand->category ?? 'product';
+        $website   = $brand->website  ?? null;
 
-        // Format evidence
         $evidenceText = '';
         foreach ($evidence as $e) {
             $evidenceText .= "- [{$e->source_type}] {$e->source_title}\n";
@@ -270,12 +274,17 @@ PROMPT;
             $evidenceText .= "  Authority score: {$e->authority_score}/4\n\n";
         }
 
-        // Classification context
-        $displacementMechanism = $classification->displacement_mechanism ?? 'Unknown displacement mechanism.';
-        $t4Winner              = $probeRun->t4_winner ?? 'unknown competitor';
-        $ditTurn               = $probeRun->dit_turn  ?? 'unknown';
+        $displacementMechanism  = $classification->displacement_mechanism  ?? 'Unknown displacement mechanism.';
+        $displacementCriteria   = $classification->displacement_criteria   ?? null;
+        $t4Winner               = $probeRun->t4_winner ?? 'unknown competitor';
+        $ditTurn                = $probeRun->dit_turn  ?? 'unknown';
+        $handoffTurn            = $probeRun->handoff_turn ?? 'unknown';
 
         $slug = strtolower(preg_replace('/[^a-z0-9]+/i', '-', $brandName));
+
+        $criteriaLine = $displacementCriteria
+            ? "Displacement criteria (exact question AI applied): {$displacementCriteria}"
+            : '';
 
         return <<<MSG
 ## BRAND
@@ -286,8 +295,10 @@ Brand slug (for atom ID): {$slug}
 
 ## DIAGNOSTIC CONTEXT
 Displacement mechanism: {$displacementMechanism}
-T4 winner (competitor that won final recommendation): {$t4Winner}
+{$criteriaLine}
+Competitor that won final recommendation (T4 winner): {$t4Winner}
 DIT turn (when displacement initiated): {$ditTurn}
+Commercial handoff turn: {$handoffTurn}
 Filter being addressed: {$filterType}
 Model variant: {$modelVariant}
 
@@ -295,7 +306,7 @@ Model variant: {$modelVariant}
 {$evidenceText}
 
 ## INSTRUCTION
-Generate the MAS 1.1 atom. Use only the evidence above. The atom must pre-answer the question the model asks at the reasoning stage. Return JSON only.
+Generate the MAS 1.1 atom. The atom must directly address the displacement criteria above — this is the specific question the AI applied when it routed away from this brand. The conversational answer must pre-answer that exact question using only the verified evidence. Return JSON only.
 MSG;
     }
 
@@ -308,7 +319,6 @@ MSG;
         $score = 100;
         $notes = [];
 
-        // Required MAS 1.1 fields
         $required = ['id', 'mas_version', 'entity', 'claim', 'filter_type', 'reasoning_stage', 'model_variant', 'conversational', 'citations', 'trust'];
         foreach ($required as $field) {
             if (empty($atom[$field])) {
@@ -317,39 +327,21 @@ MSG;
             }
         }
 
-        // Conversational sub-fields
-        if (empty($atom['conversational']['query'])) {
-            $score -= 10;
-            $notes[] = 'Missing conversational.query';
-        }
-        if (empty($atom['conversational']['answer'])) {
-            $score -= 10;
-            $notes[] = 'Missing conversational.answer';
-        }
+        if (empty($atom['conversational']['query']))  { $score -= 10; $notes[] = 'Missing conversational.query'; }
+        if (empty($atom['conversational']['answer'])) { $score -= 10; $notes[] = 'Missing conversational.answer'; }
 
-        // Citations check
         if (empty($atom['citations']) || !is_array($atom['citations'])) {
             $score -= 15;
             $notes[] = 'No citations provided';
         }
 
-        // Trust check
         if (empty($atom['trust']['verified'])) {
             $score -= 10;
             $notes[] = 'Trust.verified is false or missing';
         }
 
-        // Filter type match
-        if (($atom['filter_type'] ?? '') !== $filterType) {
-            $score -= 10;
-            $notes[] = "Filter type mismatch: expected {$filterType}";
-        }
-
-        // Model variant match
-        if (($atom['model_variant'] ?? '') !== $modelVariant) {
-            $score -= 5;
-            $notes[] = "Model variant mismatch: expected {$modelVariant}";
-        }
+        if (($atom['filter_type']   ?? '') !== $filterType)    { $score -= 10; $notes[] = "Filter type mismatch: expected {$filterType}"; }
+        if (($atom['model_variant'] ?? '') !== $modelVariant)  { $score -= 5;  $notes[] = "Model variant mismatch: expected {$modelVariant}"; }
 
         $score = max(0, $score);
 
@@ -360,7 +352,7 @@ MSG;
     }
 
     // -------------------------------------------------------------------------
-    // Database write
+    // Database write — all atoms start as pending_approval
     // -------------------------------------------------------------------------
 
     private function saveAtom(
@@ -369,6 +361,7 @@ MSG;
         int    $agencyId,
         string $filterType,
         string $modelVariant,
+        string $probeType,
         array  $atom,
         array  $validation
     ): string {
@@ -379,8 +372,6 @@ MSG;
             mt_rand(0, 0x3fff) | 0x8000,
             mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
         );
-
-        $status = $validation['score'] >= 70 ? 'validated' : 'draft';
 
         // Remove existing atom for same brand/audit/filter/variant
         DB::table('meridian_atoms')
@@ -399,6 +390,7 @@ MSG;
             'filter_type'           => $filterType,
             'reasoning_stage'       => $atom['reasoning_stage']   ?? null,
             'model_variant'         => $modelVariant,
+            'probe_type'            => $probeType,
             'entity'                => $atom['entity']            ?? null,
             'claim'                 => $atom['claim']             ?? null,
             'conversational_query'  => $atom['conversational']['query']  ?? null,
@@ -410,18 +402,12 @@ MSG;
             'schema_jsonld'         => json_encode($atom['schema']        ?? []),
             'validation_score'      => $validation['score'],
             'validation_notes'      => $validation['notes'],
-            'status'                => $status,
+            'status'                => 'generated',
+            'approval_status'       => 'pending_approval',
             'raw_atom'              => json_encode($atom),
             'created_at'            => now(),
             'updated_at'            => now(),
         ]);
-
-        // Update status if validated
-        if ($status === 'validated') {
-            DB::table('meridian_atoms')
-                ->where('id', $id)
-                ->update(['status' => 'validated', 'updated_at' => now()]);
-        }
 
         return $id;
     }
@@ -448,7 +434,6 @@ MSG;
 
     private function getReasoningStage(string $filterType): array
     {
-        // Map filter types to the reasoning stage where they operate
         return match($filterType) {
             'T0'    => self::REASONING_STAGE_MAP['T1'],
             'T1'    => self::REASONING_STAGE_MAP['T3'],
