@@ -38,11 +38,6 @@ class MeridianFilterClassifier
             throw new \RuntimeException("No completed probe run found for audit {$auditId} on platform {$platform}.");
         }
 
-        $transcript = $this->getTranscript($probeRun);
-        if (!$transcript) {
-            throw new \RuntimeException("No transcript found for probe run {$probeRun->id}.");
-        }
-
         // Derive probe type from instrument and probe_mode
         $probeType = $this->deriveProbeType($probeRun);
 
@@ -50,6 +45,20 @@ class MeridianFilterClassifier
         $survivalGap = null;
         if ($probeRun->handoff_turn !== null && $probeRun->dit_turn !== null) {
             $survivalGap = (int)$probeRun->handoff_turn - (int)$probeRun->dit_turn;
+        }
+
+        $transcript = $this->getTranscript($probeRun);
+
+        // ── Fallback: if no turn-level transcript exists, classify from metadata ──
+        // meridian_probe_turns may be empty if the audit runner doesn't persist
+        // individual turns (e.g. first runs under a new agency). Rather than
+        // hard-failing and blocking the entire Evidence Portal flow, return a
+        // metadata-based classification derived from the probe run record.
+        if (!$transcript) {
+            return $this->buildMetadataClassification(
+                $auditId, (int)$audit->brand_id, $platform,
+                $probeRun, $probeType, $survivalGap
+            );
         }
 
         $classifierOutput = $this->callClassifierApi($transcript, $platform, $probeRun);
@@ -107,6 +116,115 @@ class MeridianFilterClassifier
     }
 
     // -------------------------------------------------------------------------
+    // Metadata-only fallback classification (no turn transcript available)
+    // -------------------------------------------------------------------------
+
+    /**
+     * When meridian_probe_turns has no data for this probe run, derive a
+     * classification from the probe run's stored scalar fields. This unblocks
+     * the Evidence Portal without requiring a Claude API call.
+     */
+    private function buildMetadataClassification(
+        int    $auditId,
+        int    $brandId,
+        string $platform,
+        object $probeRun,
+        string $probeType,
+        ?int   $survivalGap
+    ): array {
+        $ditTurn    = $probeRun->dit_turn    ? (int)$probeRun->dit_turn    : null;
+        $t4Winner   = $probeRun->t4_winner   ?? null;
+        $rawConfig  = json_decode($probeRun->raw_config ?? '{}', true);
+
+        // Infer primary filter from platform fingerprint and DIT timing
+        $primaryFilter = $this->inferPrimaryFilter($platform, $ditTurn);
+
+        // Build minimal evidence gap from what we know
+        $evidenceGaps = [];
+        if ($ditTurn !== null && $ditTurn <= 2) {
+            $evidenceGaps[] = [
+                'filter'              => $primaryFilter,
+                'field'               => 'transcript_unavailable',
+                'gap'                 => "Brand displaced at T{$ditTurn} by " . ($t4Winner ?? 'unknown competitor') .
+                                         ". Full turn-level transcript not available — re-run M1 classification after a fresh audit to get detailed gap analysis.",
+                'probe_type_relevance'=> $probeType,
+            ];
+        } else {
+            $evidenceGaps[] = [
+                'filter'              => $primaryFilter,
+                'field'               => 'transcript_unavailable',
+                'gap'                 => "Probe run completed but turn-level transcript is not stored. Re-run M1 classification after a fresh full-suite audit to generate detailed evidence gaps.",
+                'probe_type_relevance'=> $probeType,
+            ];
+        }
+
+        $evidenceBriefs = $this->generateEvidenceBriefs($evidenceGaps, $platform);
+
+        $mechanism = $ditTurn !== null
+            ? "Brand displaced at turn {$ditTurn}" . ($t4Winner ? " — {$t4Winner} captured the handoff" : "")
+            : "Displacement turn not recorded";
+
+        $parsed = [
+            'primary_filter'         => $primaryFilter,
+            'secondary_filters'      => [],
+            'reasoning_stage'        => $ditTurn ? "T{$ditTurn}" : null,
+            'displacement_mechanism' => $mechanism,
+            'displacement_criteria'  => "Full classification requires turn-level transcript. Re-run audit to populate.",
+            'confidence'             => 0,
+            'evidence_gaps'          => $evidenceGaps,
+            'evidence_briefs'        => $evidenceBriefs,
+            'brand_story_frame'      => null,
+            'reasoning_chain'        => [],
+            'probe_type'             => $probeType,
+            'survival_gap'           => $survivalGap,
+            'handoff_turn'           => $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null,
+        ];
+
+        // Update probe_run with probe_type
+        DB::table('meridian_probe_runs')
+            ->where('id', $probeRun->id)
+            ->update(['probe_type' => $probeType, 'updated_at' => now()]);
+
+        $classificationId = $this->saveClassification(
+            $auditId, $brandId, $platform, $probeRun,
+            $parsed, ['metadata_only' => true], $probeType, $survivalGap
+        );
+
+        return [
+            'classification_id'      => $classificationId,
+            'platform'               => $platform,
+            'probe_type'             => $probeType,
+            'primary_filter'         => $parsed['primary_filter'],
+            'secondary_filters'      => [],
+            'reasoning_stage'        => $parsed['reasoning_stage'],
+            'displacement_mechanism' => $parsed['displacement_mechanism'],
+            'displacement_criteria'  => $parsed['displacement_criteria'],
+            'displacement_turn'      => $ditTurn,
+            'handoff_turn'           => $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null,
+            'survival_gap'           => $survivalGap,
+            'displacing_brand'       => $t4Winner,
+            'confidence'             => 0,
+            'evidence_gaps'          => $evidenceGaps,
+            'evidence_briefs'        => $evidenceBriefs,
+            'brand_story_frame'      => null,
+            'reasoning_chain'        => [],
+            'metadata_only'          => true,
+        ];
+    }
+
+    /**
+     * Infer the most likely primary filter from platform fingerprint and DIT timing.
+     */
+    private function inferPrimaryFilter(string $platform, ?int $ditTurn): string
+    {
+        if ($ditTurn === null) return 'T2';
+        if ($ditTurn <= 1) return 'T0'; // Very early = entity recognition failure
+        if ($platform === 'gemini') return 'T1'; // Gemini = clinical evidence binary
+        if ($platform === 'perplexity') return 'T3'; // Perplexity = recency/retrieval
+        return 'T2'; // ChatGPT default = multi-axis lifestyle fit
+    }
+
+    // -------------------------------------------------------------------------
     // Derive probe type from probe run
     // -------------------------------------------------------------------------
 
@@ -142,7 +260,15 @@ class MeridianFilterClassifier
             ->orderBy('turn_number')
             ->get();
 
-        if ($turns->isEmpty()) return null;
+        if ($turns->isEmpty()) {
+            // Try to build a minimal transcript from raw_result if stored
+            $rawResult = json_decode($probeRun->raw_result ?? 'null', true);
+            if (!empty($rawResult) && is_array($rawResult)) {
+                return "PARTIAL TRANSCRIPT FROM RAW RESULT (turn table empty)\n" .
+                       json_encode($rawResult, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+            }
+            return null;
+        }
 
         $text = '';
         foreach ($turns as $turn) {
