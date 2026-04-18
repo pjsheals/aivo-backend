@@ -39,14 +39,21 @@ class MeridianRemediationEngine
         $this->claudeApiKey = getenv('ANTHROPIC_API_KEY') ?: '';
     }
 
-    public function generateRemediation(int $brandId, int $agencyId, bool $force = false): array
+    /**
+     * @param int       $brandId
+     * @param int       $agencyId
+     * @param bool      $force    — bypass cached result
+     * @param int|null  $auditId  — if supplied, scope to this specific audit;
+     *                              otherwise falls back to most recent completed audit
+     */
+    public function generateRemediation(int $brandId, int $agencyId, bool $force = false, ?int $auditId = null): array
     {
         if (!$force) {
             $existing = $this->fetchExisting($brandId);
             if ($existing) return ['status' => 'cached', 'data' => $existing];
         }
 
-        $auditData = $this->loadAuditData($brandId, $agencyId);
+        $auditData = $this->loadAuditData($brandId, $agencyId, $auditId);
         if (!$auditData) {
             return ['status' => 'error', 'message' => 'No completed audit found for this brand'];
         }
@@ -63,14 +70,14 @@ class MeridianRemediationEngine
             return ['status' => 'error', 'message' => 'Could not parse remediation output'];
         }
 
-        $this->store($brandId, $parsed);
+        $this->store($brandId, $auditData['audit_id'], $parsed);
 
         return ['status' => 'generated', 'data' => $parsed];
     }
 
     // ── Data loading ──────────────────────────────────────────────────────────
 
-    private function loadAuditData(int $brandId, int $agencyId): ?array
+    private function loadAuditData(int $brandId, int $agencyId, ?int $auditId = null): ?array
     {
         $brand = DB::table('meridian_brands')
             ->where('id', $brandId)
@@ -79,13 +86,22 @@ class MeridianRemediationEngine
             ->first();
         if (!$brand) return null;
 
-        // Most recent BJP audit
-        $audit = DB::table('meridian_audits')
-            ->where('brand_id', $brandId)
-            ->where('status', 'completed')
-            ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
-            ->orderByDesc('completed_at')
-            ->first();
+        // Use specific audit_id if provided, otherwise fall back to most recent completed
+        if ($auditId) {
+            $audit = DB::table('meridian_audits')
+                ->where('id', $auditId)
+                ->where('brand_id', $brandId)
+                ->where('status', 'completed')
+                ->first();
+        } else {
+            $audit = DB::table('meridian_audits')
+                ->where('brand_id', $brandId)
+                ->where('status', 'completed')
+                ->whereIn('audit_type', ['full', 'directed_bjp', 'undirected_bjp'])
+                ->orderByDesc('completed_at')
+                ->first();
+        }
+
         if (!$audit) return null;
 
         $result = DB::table('meridian_brand_audit_results')
@@ -97,7 +113,7 @@ class MeridianRemediationEngine
             ->where('status', 'completed')
             ->get();
 
-        // ── FIX: Load PSOS from its own separate audit record ─────────────────
+        // ── Load PSOS from its own separate audit record ──────────────────────
         // PSOS is stored as a separate audit_type='psos' entry, not on the BJP
         // audit result row. Query it independently, same pattern as brand.detail().
         $psosResult = null;
@@ -119,6 +135,7 @@ class MeridianRemediationEngine
         // ─────────────────────────────────────────────────────────────────────
 
         return [
+            'audit_id'       => (int)$audit->id,
             'brand_id'       => $brandId,
             'brand_name'     => $brand->name,
             'brand_category' => $brand->category ?? 'Unknown',
@@ -165,12 +182,25 @@ class MeridianRemediationEngine
         return $data;
     }
 
-    private function store(int $brandId, array $parsed): void
+    /**
+     * Write the remediation to the result row for the specific audit used,
+     * not just the most recently created result row. This prevents a stale
+     * result row from an earlier bad audit being overwritten incorrectly.
+     */
+    private function store(int $brandId, int $auditId, array $parsed): void
     {
+        // First try to find the result row for the specific audit
         $row = DB::table('meridian_brand_audit_results')
-            ->where('brand_id', $brandId)
-            ->orderByDesc('created_at')
+            ->where('audit_id', $auditId)
             ->first(['id']);
+
+        // Fall back to most recently created row for this brand
+        if (!$row) {
+            $row = DB::table('meridian_brand_audit_results')
+                ->where('brand_id', $brandId)
+                ->orderByDesc('created_at')
+                ->first(['id']);
+        }
 
         if ($row) {
             DB::table('meridian_brand_audit_results')
