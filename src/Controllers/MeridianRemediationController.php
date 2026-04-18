@@ -74,12 +74,17 @@ class MeridianRemediationController
     }
 
     /**
-     * GET /api/meridian/remediation?brand_id=X
+     * GET /api/meridian/remediation?brand_id=X[&audit_id=Y]
+     *
+     * If audit_id is supplied, returns the remediation stored for that specific
+     * audit result row. Falls back to the most recently generated remediation
+     * for the brand if no audit_id is given or if that audit has no stored report.
      */
     public function fetch(): void
     {
         $auth    = MeridianAuth::require('viewer');
         $brandId = (int)($_GET['brand_id'] ?? 0);
+        $auditId = isset($_GET['audit_id']) && $_GET['audit_id'] ? (int)$_GET['audit_id'] : null;
 
         if (!$brandId) {
             http_response_code(422);
@@ -99,11 +104,25 @@ class MeridianRemediationController
             return;
         }
 
-        $row = DB::table('meridian_brand_audit_results')
-            ->where('brand_id', $brandId)
-            ->whereNotNull('remediation_json')
-            ->orderByDesc('created_at')
-            ->first(['remediation_json', 'remediation_generated_at']);
+        $row = null;
+
+        // If audit_id supplied, try to find the remediation for that specific audit first
+        if ($auditId) {
+            $row = DB::table('meridian_brand_audit_results')
+                ->where('audit_id', $auditId)
+                ->where('brand_id', $brandId)
+                ->whereNotNull('remediation_json')
+                ->first(['remediation_json', 'remediation_generated_at']);
+        }
+
+        // Fall back to most recently generated remediation for this brand
+        if (!$row) {
+            $row = DB::table('meridian_brand_audit_results')
+                ->where('brand_id', $brandId)
+                ->whereNotNull('remediation_json')
+                ->orderByDesc('remediation_generated_at')
+                ->first(['remediation_json', 'remediation_generated_at']);
+        }
 
         if (!$row) {
             http_response_code(404);
