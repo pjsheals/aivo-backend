@@ -34,6 +34,17 @@ class MeridianFilterClassifier
             ->orderByDesc('completed_at')
             ->first();
 
+        // Fallback: if no completed probe run, accept any status.
+        // The worker may not mark probe runs as completed even when the
+        // audit itself is done — the audit completion is the authority.
+        if (!$probeRun) {
+            $probeRun = DB::table('meridian_probe_runs')
+                ->where('audit_id', $auditId)
+                ->where('platform', $platform)
+                ->orderByDesc('updated_at')
+                ->first();
+        }
+
         if (!$probeRun) {
             // No probe run in meridian_probe_runs — fall back to journey_runs JSON
             // stored in meridian_brand_audit_results. This happens when the audit
@@ -52,16 +63,24 @@ class MeridianFilterClassifier
 
         $transcript = $this->getTranscript($probeRun);
 
-        // ── Fallback: if no turn-level transcript exists, classify from metadata ──
+        // ── Fallback: no transcript ───────────────────────────────────────────
         // meridian_probe_turns may be empty if the audit runner doesn't persist
-        // individual turns (e.g. first runs under a new agency). Rather than
-        // hard-failing and blocking the entire Evidence Portal flow, return a
-        // metadata-based classification derived from the probe run record.
+        // individual turns. Check if the probe run has meaningful metadata
+        // (dit_turn, t4_winner set by the worker). If it does, use that.
+        // If not (e.g. probe run is still queued with null fields), fall back
+        // to the journey_runs JSON blob in meridian_brand_audit_results which
+        // is where the worker stores the structured results summary.
         if (!$transcript) {
-            return $this->buildMetadataClassification(
-                $auditId, (int)$audit->brand_id, $platform,
-                $probeRun, $probeType, $survivalGap
-            );
+            $hasMetadata = ($probeRun->dit_turn !== null || $probeRun->t4_winner !== null
+                         || $probeRun->handoff_turn !== null);
+            if ($hasMetadata) {
+                return $this->buildMetadataClassification(
+                    $auditId, (int)$audit->brand_id, $platform,
+                    $probeRun, $probeType, $survivalGap
+                );
+            }
+            // Probe run exists but has no useful data — fall back to journey_runs
+            return $this->buildJourneyRunsClassification($auditId, (int)$audit->brand_id, $platform);
         }
 
         $classifierOutput = $this->callClassifierApi($transcript, $platform, $probeRun);
@@ -260,10 +279,66 @@ class MeridianFilterClassifier
         $t4Winner    = $journeyRuns['t4_winner'] ?? null;
         $survivalGap = ($ditTurn !== null && $handoff !== null) ? $handoff - $ditTurn : null;
 
-        $primaryFilter = $this->inferPrimaryFilter($platform, $ditTurn);
-        $probeType     = isset($journeyRuns['probe_mode']) && $journeyRuns['probe_mode'] === 'generic'
+        $probeType = isset($journeyRuns['probe_mode']) && $journeyRuns['probe_mode'] === 'generic'
             ? 'spontaneous_consideration' : 'decision_stage';
 
+        $syntheticRun = (object)[
+            'id'               => 0,
+            'platform'         => $platform,
+            'probe_mode'       => $journeyRuns['probe_mode'] ?? 'anchored',
+            'instrument'       => $journeyRuns['instrument'] ?? 'BJP-D',
+            'dit_turn'         => $ditTurn,
+            'handoff_turn'     => $handoff,
+            't4_winner'        => $t4Winner,
+            'turns_completed'  => $journeyRuns['turns'] ?? null,
+            'termination_type' => $journeyRuns['termination'] ?? null,
+        ];
+
+        // If we have journey_runs data with DIT info, build a synthetic transcript
+        // and run the full Claude classifier — this gives real gap analysis rather
+        // than placeholder text.
+        if (!empty($journeyRuns) && $ditTurn !== null) {
+            $syntheticTranscript = $this->buildJourneyRunsTranscript($journeyRuns, $platform);
+            try {
+                $classifierOutput = $this->callClassifierApi($syntheticTranscript, $platform, $syntheticRun);
+                $parsed           = $this->parseClassifierOutput($classifierOutput);
+                $parsed['evidence_briefs'] = $this->generateEvidenceBriefs($parsed['evidence_gaps'] ?? [], $platform);
+                $parsed['probe_type']   = $probeType;
+                $parsed['survival_gap'] = $survivalGap;
+                $parsed['handoff_turn'] = $handoff;
+
+                $classificationId = $this->saveClassification(
+                    $auditId, $brandId, $platform, $syntheticRun,
+                    $parsed, $classifierOutput, $probeType, $survivalGap
+                );
+
+                return [
+                    'classification_id'      => $classificationId,
+                    'platform'               => $platform,
+                    'probe_type'             => $probeType,
+                    'primary_filter'         => $parsed['primary_filter']        ?? null,
+                    'secondary_filters'      => $parsed['secondary_filters']     ?? [],
+                    'reasoning_stage'        => $parsed['reasoning_stage']       ?? null,
+                    'displacement_mechanism' => $parsed['displacement_mechanism'] ?? null,
+                    'displacement_criteria'  => $parsed['displacement_criteria'] ?? null,
+                    'displacement_turn'      => $ditTurn,
+                    'handoff_turn'           => $handoff,
+                    'survival_gap'           => $survivalGap,
+                    'displacing_brand'       => $t4Winner,
+                    'confidence'             => $parsed['confidence']            ?? 0,
+                    'evidence_gaps'          => $parsed['evidence_gaps']         ?? [],
+                    'evidence_briefs'        => $parsed['evidence_briefs']       ?? [],
+                    'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
+                    'reasoning_chain'        => $parsed['reasoning_chain']       ?? [],
+                ];
+            } catch (\Throwable $e) {
+                log_error('[MeridianFilterClassifier] journey_runs Claude call failed', ['error' => $e->getMessage()]);
+                // Fall through to metadata-only classification below
+            }
+        }
+
+        // Final fallback — no journey_runs data or Claude failed
+        $primaryFilter = $this->inferPrimaryFilter($platform, $ditTurn);
         $mechanism = $ditTurn !== null
             ? "Brand displaced at turn {$ditTurn}" . ($t4Winner ? " — {$t4Winner} captured the handoff" : "")
             : "Displacement turn not recorded";
@@ -271,7 +346,7 @@ class MeridianFilterClassifier
         $evidenceGaps = [[
             'filter'               => $primaryFilter,
             'field'                => 'probe_run_unavailable',
-            'gap'                  => "Probe run data sourced from journey_runs summary (no individual probe rows). " .
+            'gap'                  => "Probe run data sourced from journey_runs summary. " .
                                       "DIT: " . ($ditTurn !== null ? "T{$ditTurn}" : "not recorded") . ". " .
                                       "T4 winner: " . ($t4Winner ?? "none") . ". " .
                                       "Re-run a fresh full-suite audit to generate full transcript-level classification.",
@@ -294,17 +369,6 @@ class MeridianFilterClassifier
             'probe_type'             => $probeType,
             'survival_gap'           => $survivalGap,
             'handoff_turn'           => $handoff,
-        ];
-
-        $syntheticRun = (object)[
-            'id'               => 0,
-            'platform'         => $platform,
-            'probe_mode'       => $journeyRuns['probe_mode'] ?? 'anchored',
-            'dit_turn'         => $ditTurn,
-            'handoff_turn'     => $handoff,
-            't4_winner'        => $t4Winner,
-            'turns_completed'  => $journeyRuns['turns'] ?? null,
-            'termination_type' => $journeyRuns['termination'] ?? null,
         ];
 
         $classificationId = $this->saveClassification(
@@ -332,6 +396,61 @@ class MeridianFilterClassifier
             'reasoning_chain'        => [],
             'journey_runs_fallback'  => true,
         ];
+    }
+
+    /**
+     * Build a synthetic transcript from journey_runs summary data.
+     * Used when meridian_probe_turns is empty but journey_runs JSON has
+     * structured probe result data from the audit worker.
+     */
+    private function buildJourneyRunsTranscript(array $journeyRuns, string $platform): string
+    {
+        $lines = ["SYNTHETIC TRANSCRIPT FROM JOURNEY RUNS SUMMARY"];
+        $lines[] = "Platform: {$platform}";
+        $lines[] = "Note: Turn-level transcript unavailable. Classification based on probe run summary data.";
+        $lines[] = "";
+
+        $ditTurn   = $journeyRuns['dit_turn']    ?? null;
+        $handoff   = $journeyRuns['handoff_turn'] ?? null;
+        $t4Winner  = $journeyRuns['t4_winner']   ?? null;
+        $turns     = $journeyRuns['turns']        ?? null;
+        $probeMode = $journeyRuns['probe_mode']  ?? 'anchored';
+        $term      = $journeyRuns['termination'] ?? null;
+        $score     = $journeyRuns['score']       ?? null;
+
+        $lines[] = "=== PROBE RUN SUMMARY ===";
+        $lines[] = "Probe mode: {$probeMode}";
+        if ($turns)    $lines[] = "Turns completed: {$turns}";
+        if ($ditTurn)  $lines[] = "DIT (displacement initiation turn): T{$ditTurn} [DIT TURN]";
+        if ($handoff)  $lines[] = "Commercial handoff turn: T{$handoff} [HANDOFF TURN]";
+        if ($t4Winner) $lines[] = "T4 winner (brand capturing handoff): {$t4Winner}";
+        if ($term)     $lines[] = "Termination type: {$term}";
+        if ($score !== null) $lines[] = "Probe score: {$score}";
+
+        // Include any additional structured data from the run
+        $exclude = ['dit_turn','handoff_turn','t4_winner','turns','probe_mode','termination','score','platform'];
+        foreach ($journeyRuns as $key => $val) {
+            if (!in_array($key, $exclude, true) && !is_array($val) && $val !== null && $val !== '') {
+                $lines[] = ucfirst(str_replace('_', ' ', $key)) . ": {$val}";
+            }
+        }
+
+        $lines[] = "";
+        $lines[] = "=== DISPLACEMENT CONTEXT ===";
+        if ($ditTurn !== null && $t4Winner !== null) {
+            $lines[] = "Brand held primary status until turn {$ditTurn}, at which point {$t4Winner} was recommended instead.";
+            if ($handoff !== null) {
+                $gap = $handoff - $ditTurn;
+                $lines[] = "The commercial handoff occurred at turn {$handoff} ({$gap} turns of revenue exposure after displacement).";
+            }
+        } elseif ($ditTurn !== null) {
+            $lines[] = "Displacement initiated at turn {$ditTurn}. Brand absent from commercial handoff.";
+        } else {
+            $lines[] = "No displacement recorded — brand held primary status throughout or was absent from start.";
+        }
+
+        return implode("
+", $lines);
     }
 
     private function deriveProbeType(object $probeRun): string
