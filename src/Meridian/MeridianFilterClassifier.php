@@ -35,7 +35,10 @@ class MeridianFilterClassifier
             ->first();
 
         if (!$probeRun) {
-            throw new \RuntimeException("No completed probe run found for audit {$auditId} on platform {$platform}.");
+            // No probe run in meridian_probe_runs — fall back to journey_runs JSON
+            // stored in meridian_brand_audit_results. This happens when the audit
+            // runner writes results as a JSON blob rather than individual probe rows.
+            return $this->buildJourneyRunsClassification($auditId, (int)$audit->brand_id, $platform);
         }
 
         // Derive probe type from instrument and probe_mode
@@ -227,6 +230,109 @@ class MeridianFilterClassifier
     // -------------------------------------------------------------------------
     // Derive probe type from probe run
     // -------------------------------------------------------------------------
+
+
+    /**
+     * Fallback when meridian_probe_runs has no rows for this audit.
+     * Reads the journey_runs JSON blob from meridian_brand_audit_results
+     * and synthesises a classification from whatever platform data exists.
+     */
+    private function buildJourneyRunsClassification(int $auditId, int $brandId, string $platform): array
+    {
+        $resultRow = DB::table('meridian_brand_audit_results')
+            ->where('audit_id', $auditId)
+            ->first();
+
+        $journeyRuns = [];
+        if ($resultRow && !empty($resultRow->journey_runs)) {
+            $allRuns = json_decode($resultRow->journey_runs, true) ?? [];
+            foreach ($allRuns as $key => $run) {
+                $runPlatform = is_string($key) ? $key : ($run['platform'] ?? '');
+                if (strtolower($runPlatform) === $platform) {
+                    $journeyRuns = $run;
+                    break;
+                }
+            }
+        }
+
+        $ditTurn     = isset($journeyRuns['dit_turn'])    ? (int)$journeyRuns['dit_turn']    : null;
+        $handoff     = isset($journeyRuns['handoff_turn']) ? (int)$journeyRuns['handoff_turn'] : null;
+        $t4Winner    = $journeyRuns['t4_winner'] ?? null;
+        $survivalGap = ($ditTurn !== null && $handoff !== null) ? $handoff - $ditTurn : null;
+
+        $primaryFilter = $this->inferPrimaryFilter($platform, $ditTurn);
+        $probeType     = isset($journeyRuns['probe_mode']) && $journeyRuns['probe_mode'] === 'generic'
+            ? 'spontaneous_consideration' : 'decision_stage';
+
+        $mechanism = $ditTurn !== null
+            ? "Brand displaced at turn {$ditTurn}" . ($t4Winner ? " — {$t4Winner} captured the handoff" : "")
+            : "Displacement turn not recorded";
+
+        $evidenceGaps = [[
+            'filter'               => $primaryFilter,
+            'field'                => 'probe_run_unavailable',
+            'gap'                  => "Probe run data sourced from journey_runs summary (no individual probe rows). " .
+                                      "DIT: " . ($ditTurn !== null ? "T{$ditTurn}" : "not recorded") . ". " .
+                                      "T4 winner: " . ($t4Winner ?? "none") . ". " .
+                                      "Re-run a fresh full-suite audit to generate full transcript-level classification.",
+            'probe_type_relevance' => $probeType,
+        ]];
+
+        $evidenceBriefs = $this->generateEvidenceBriefs($evidenceGaps, $platform);
+
+        $parsed = [
+            'primary_filter'         => $primaryFilter,
+            'secondary_filters'      => [],
+            'reasoning_stage'        => $ditTurn ? "T{$ditTurn}" : null,
+            'displacement_mechanism' => $mechanism,
+            'displacement_criteria'  => "Full classification requires probe run rows. Re-run a fresh audit to populate.",
+            'confidence'             => 0,
+            'evidence_gaps'          => $evidenceGaps,
+            'evidence_briefs'        => $evidenceBriefs,
+            'brand_story_frame'      => null,
+            'reasoning_chain'        => [],
+            'probe_type'             => $probeType,
+            'survival_gap'           => $survivalGap,
+            'handoff_turn'           => $handoff,
+        ];
+
+        $syntheticRun = (object)[
+            'id'               => 0,
+            'platform'         => $platform,
+            'probe_mode'       => $journeyRuns['probe_mode'] ?? 'anchored',
+            'dit_turn'         => $ditTurn,
+            'handoff_turn'     => $handoff,
+            't4_winner'        => $t4Winner,
+            'turns_completed'  => $journeyRuns['turns'] ?? null,
+            'termination_type' => $journeyRuns['termination'] ?? null,
+        ];
+
+        $classificationId = $this->saveClassification(
+            $auditId, $brandId, $platform, $syntheticRun,
+            $parsed, ['journey_runs_fallback' => true], $probeType, $survivalGap
+        );
+
+        return [
+            'classification_id'      => $classificationId,
+            'platform'               => $platform,
+            'probe_type'             => $probeType,
+            'primary_filter'         => $primaryFilter,
+            'secondary_filters'      => [],
+            'reasoning_stage'        => $parsed['reasoning_stage'],
+            'displacement_mechanism' => $mechanism,
+            'displacement_criteria'  => $parsed['displacement_criteria'],
+            'displacement_turn'      => $ditTurn,
+            'handoff_turn'           => $handoff,
+            'survival_gap'           => $survivalGap,
+            'displacing_brand'       => $t4Winner,
+            'confidence'             => 0,
+            'evidence_gaps'          => $evidenceGaps,
+            'evidence_briefs'        => $evidenceBriefs,
+            'brand_story_frame'      => null,
+            'reasoning_chain'        => [],
+            'journey_runs_fallback'  => true,
+        ];
+    }
 
     private function deriveProbeType(object $probeRun): string
     {
