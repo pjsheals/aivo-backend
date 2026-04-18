@@ -174,13 +174,22 @@ class MeridianSuperadminController
                 'updated_at'    => now(),
             ]);
 
+            // ── COMMIT before any post-commit side effects ──────
+            // IMPORTANT: logAdminAction must run AFTER commit.
+            // In PostgreSQL, any failed statement inside a transaction marks the
+            // entire transaction as aborted — even if PHP catches the exception.
+            // Calling DB::commit() on an aborted transaction silently rolls back.
+            // Moving the audit log write outside the transaction prevents a failed
+            // log insert (e.g. FK violation on agency_id=0) from rolling back the
+            // agency + user creation.
+            DB::commit();
+
+            // Log after commit — failure here cannot affect the committed data
             $this->logAdminAction($admin->admin_email, 'agency.created', 'agency', $agencyId, [
                 'agency_name' => $agencyName,
                 'email'       => $userEmail,
                 'plan_type'   => $planType,
             ]);
-
-            DB::commit();
 
             json_response([
                 'status'   => 'ok',
