@@ -132,8 +132,9 @@ class MeridianFilterClassifier
             'confidence'             => $parsed['confidence']             ?? 0,
             'evidence_gaps'          => $parsed['evidence_gaps']         ?? [],
             'evidence_briefs'        => $parsed['evidence_briefs']       ?? [],
-            'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
-            'reasoning_chain'        => $parsed['reasoning_chain']       ?? [],
+            'brand_story_frame'         => $parsed['brand_story_frame']        ?? null,
+            'reasoning_chain'           => $parsed['reasoning_chain']          ?? [],
+            'mechanism_explanation'     => $parsed['mechanism_explanation']     ?? null,
         ];
     }
 
@@ -235,8 +236,9 @@ class MeridianFilterClassifier
             'confidence'             => $parsed['confidence']             ?? 0,
             'evidence_gaps'          => $parsed['evidence_gaps']         ?? [],
             'evidence_briefs'        => $parsed['evidence_briefs']       ?? [],
-            'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
-            'reasoning_chain'        => $parsed['reasoning_chain']       ?? [],
+            'brand_story_frame'         => $parsed['brand_story_frame']        ?? null,
+            'reasoning_chain'           => $parsed['reasoning_chain']          ?? [],
+            'mechanism_explanation'     => $parsed['mechanism_explanation']     ?? null,
         ];
     }
 
@@ -300,6 +302,7 @@ class MeridianFilterClassifier
             'evidence_briefs'        => $evidenceBriefs,
             'brand_story_frame'      => null,
             'reasoning_chain'        => [],
+            'mechanism_explanation'  => null,
             'probe_type'             => $probeType,
             'survival_gap'           => $survivalGap,
             'handoff_turn'           => $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null,
@@ -333,6 +336,7 @@ class MeridianFilterClassifier
             'evidence_briefs'        => $evidenceBriefs,
             'brand_story_frame'      => null,
             'reasoning_chain'        => [],
+            'mechanism_explanation'  => null,
             'metadata_only'          => true,
         ];
     }
@@ -440,6 +444,7 @@ class MeridianFilterClassifier
                     'evidence_briefs'        => $parsed['evidence_briefs']       ?? [],
                     'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
                     'reasoning_chain'        => $parsed['reasoning_chain']       ?? [],
+                    'mechanism_explanation'  => $parsed['mechanism_explanation'] ?? null,
                 ];
             } catch (\Throwable $e) {
                 log_error('[MeridianFilterClassifier] journey_runs Claude call failed', ['error' => $e->getMessage()]);
@@ -476,6 +481,7 @@ class MeridianFilterClassifier
             'evidence_briefs'        => $evidenceBriefs,
             'brand_story_frame'      => null,
             'reasoning_chain'        => [],
+            'mechanism_explanation'  => null,
             'probe_type'             => $probeType,
             'survival_gap'           => $survivalGap,
             'handoff_turn'           => $handoff,
@@ -504,6 +510,7 @@ class MeridianFilterClassifier
             'evidence_briefs'        => $evidenceBriefs,
             'brand_story_frame'      => null,
             'reasoning_chain'        => [],
+            'mechanism_explanation'  => null,
             'journey_runs_fallback'  => true,
         ];
     }
@@ -753,7 +760,14 @@ Return ONLY valid JSON. No preamble, no markdown.
     { "step": 2, "question": "What optimisation criterion did the model apply?", "signal": "What the transcript shows." },
     { "step": 3, "question": "Did the brand meet that criterion?", "signal": "What the transcript shows." },
     { "step": 4, "question": "Which competitor met it instead?", "signal": "What the transcript shows." }
-  ]
+  ],
+  "mechanism_explanation": {
+    "why_this_happened": "Plain English explanation of why the AI produced this displacement — not what happened, but WHY. Explain the underlying model behaviour, category confusion, or training data gap that caused it. 2-3 sentences maximum. Write for a brand manager, not a developer.",
+    "root_cause": "The single upstream cause — e.g. entity recognition failure, training data absence, category misclassification, recency gap. One sentence.",
+    "is_downstream_of": "null, or the filter code (e.g. T0) that this gap is a symptom of. If fixing another gap would likely resolve this one, name it here.",
+    "priority_signal": "act_now | act_after_T0 | monitor | self_resolves_with_T0",
+    "user_action": "One concrete sentence telling the brand manager exactly what to do first about this specific gap."
+  }
 }
 PROMPT;
     }
@@ -920,9 +934,10 @@ MSG;
             'displacement_criteria'  => $parsed['displacement_criteria'] ?? null,
             'evidence_gaps'          => json_encode($parsed['evidence_gaps']       ?? []),
             'evidence_briefs'        => json_encode($parsed['evidence_briefs']     ?? []),
-            'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
-            'reasoning_chain'        => json_encode($parsed['reasoning_chain']     ?? []),
-            'classifier_output'      => json_encode($rawOutput),
+            'brand_story_frame'         => $parsed['brand_story_frame']        ?? null,
+            'reasoning_chain'           => json_encode($parsed['reasoning_chain']   ?? []),
+            'mechanism_explanation'     => json_encode($parsed['mechanism_explanation'] ?? null),
+            'classifier_output'         => json_encode($rawOutput),
             'confidence_score'       => $parsed['confidence']            ?? 0,
             'created_at'             => now(),
         ]);
