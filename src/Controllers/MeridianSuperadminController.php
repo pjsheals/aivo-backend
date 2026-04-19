@@ -714,6 +714,7 @@ class MeridianSuperadminController
             "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS handoff_turn SMALLINT",
             "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS survival_gap SMALLINT",
             "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS displacement_criteria TEXT",
+            "ALTER TABLE meridian_filter_classifications ADD COLUMN IF NOT EXISTS mechanism_explanation JSONB",
             "ALTER TABLE meridian_atoms ADD COLUMN IF NOT EXISTS probe_type VARCHAR(30)",
             "ALTER TABLE meridian_atoms ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) DEFAULT 'pending_approval'",
             "ALTER TABLE meridian_atoms ADD COLUMN IF NOT EXISTS approval_notes TEXT",
