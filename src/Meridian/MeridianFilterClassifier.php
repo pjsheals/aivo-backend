@@ -138,6 +138,109 @@ class MeridianFilterClassifier
     }
 
     // -------------------------------------------------------------------------
+    // Classify by specific platform + probe_mode
+    // -------------------------------------------------------------------------
+
+    /**
+     * Classify a specific platform × probe_mode combination.
+     * Used by classifyAll to produce one gap card per mode rather than
+     * collapsing all modes into a single classification per platform.
+     */
+    public function classifyByMode(int $auditId, string $platform, string $probeMode): array
+    {
+        $audit = DB::table('meridian_audits')->find($auditId);
+        if (!$audit) {
+            throw new \RuntimeException("Audit {$auditId} not found.");
+        }
+
+        $probeRun = DB::table('meridian_probe_runs')
+            ->where('audit_id', $auditId)
+            ->where('platform', $platform)
+            ->where('probe_mode', $probeMode)
+            ->where('status', 'completed')
+            ->orderByDesc('completed_at')
+            ->first();
+
+        if (!$probeRun) {
+            $probeRun = DB::table('meridian_probe_runs')
+                ->where('audit_id', $auditId)
+                ->where('platform', $platform)
+                ->where('probe_mode', $probeMode)
+                ->orderByDesc('updated_at')
+                ->first();
+        }
+
+        if (!$probeRun) {
+            throw new \RuntimeException("No probe run found for audit {$auditId} on {$platform}/{$probeMode}.");
+        }
+
+        $probeType   = $this->deriveProbeType($probeRun);
+        $survivalGap = null;
+        if ($probeRun->handoff_turn !== null && $probeRun->dit_turn !== null) {
+            $survivalGap = (int)$probeRun->handoff_turn - (int)$probeRun->dit_turn;
+        }
+
+        $transcript = $this->getTranscript($probeRun);
+
+        if (!$transcript) {
+            $hasMetadata = ($probeRun->dit_turn !== null || $probeRun->t4_winner !== null
+                         || $probeRun->handoff_turn !== null);
+            if ($hasMetadata) {
+                return $this->buildMetadataClassification(
+                    $auditId, (int)$audit->brand_id, $platform,
+                    $probeRun, $probeType, $survivalGap
+                );
+            }
+            return $this->buildJourneyRunsClassification($auditId, (int)$audit->brand_id, $platform);
+        }
+
+        $classifierOutput = $this->callClassifierApi($transcript, $platform, $probeRun);
+        $parsed           = $this->parseClassifierOutput($classifierOutput);
+
+        $parsed['evidence_briefs'] = $this->generateEvidenceBriefs(
+            $parsed['evidence_gaps'] ?? [],
+            $platform
+        );
+        $parsed['probe_type']   = $probeType;
+        $parsed['survival_gap'] = $survivalGap;
+        $parsed['handoff_turn'] = $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null;
+
+        DB::table('meridian_probe_runs')
+            ->where('id', $probeRun->id)
+            ->update([
+                'probe_type'            => $probeType,
+                'displacement_criteria' => $parsed['displacement_criteria'] ?? null,
+                'updated_at'            => now(),
+            ]);
+
+        $classificationId = $this->saveClassification(
+            $auditId, (int)$audit->brand_id, $platform,
+            $probeRun, $parsed, $classifierOutput, $probeType, $survivalGap
+        );
+
+        return [
+            'classification_id'      => $classificationId,
+            'platform'               => $platform,
+            'probe_mode'             => $probeMode,
+            'probe_type'             => $probeType,
+            'primary_filter'         => $parsed['primary_filter']        ?? null,
+            'secondary_filters'      => $parsed['secondary_filters']     ?? [],
+            'reasoning_stage'        => $parsed['reasoning_stage']       ?? null,
+            'displacement_mechanism' => $parsed['displacement_mechanism'] ?? null,
+            'displacement_criteria'  => $parsed['displacement_criteria'] ?? null,
+            'displacement_turn'      => $probeRun->dit_turn     ? (int)$probeRun->dit_turn     : null,
+            'handoff_turn'           => $probeRun->handoff_turn ? (int)$probeRun->handoff_turn : null,
+            'survival_gap'           => $survivalGap,
+            'displacing_brand'       => $probeRun->t4_winner ?? null,
+            'confidence'             => $parsed['confidence']             ?? 0,
+            'evidence_gaps'          => $parsed['evidence_gaps']         ?? [],
+            'evidence_briefs'        => $parsed['evidence_briefs']       ?? [],
+            'brand_story_frame'      => $parsed['brand_story_frame']     ?? null,
+            'reasoning_chain'        => $parsed['reasoning_chain']       ?? [],
+        ];
+    }
+
+    // -------------------------------------------------------------------------
     // Metadata-only fallback classification (no turn transcript available)
     // -------------------------------------------------------------------------
 
@@ -795,6 +898,10 @@ MSG;
             mt_rand(0, 0x3fff) | 0x8000,
             mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
         );
+
+        // probe_mode stored in classifier_output metadata for downstream use.
+        // probe_type carries the semantic type (decision_stage/spontaneous_consideration).
+        $rawOutput['_probe_mode'] = $probeRun->probe_mode ?? null;
 
         DB::table('meridian_filter_classifications')->insert([
             'id'                     => $id,
