@@ -439,6 +439,11 @@ class MeridianCrawlerGenerator
             $evidenceSummary, $atomSummary, $rcs
         );
 
+        // Ensure the actual date is in the prompt — heredoc variable interpolation
+        // can be unreliable. Replace after building the string to guarantee it.
+        $prompt = str_replace('{$today}', date('Y-m-d'), $prompt);
+        $prompt = str_replace('$today', date('Y-m-d'), $prompt);
+
         $optimisedLlmsTxt = $this->callClaude($claudeKey, $prompt, $brand->name);
 
         // Fall back to basic llms.txt if Claude fails
@@ -695,6 +700,7 @@ RULES
 - Do not invent evidence that wasn't in the data provided.
 - Platform fingerprints inform the description style: ChatGPT entries emphasise training-data permanence; Perplexity entries emphasise live retrievability and dated content.
 - Output the llms.txt content only. No preamble, no explanation, no markdown fences.
+- The # Generated line must use EXACTLY the date provided in the template above. Do not substitute your own date.
 PROMPT;
     }
 
