@@ -274,24 +274,31 @@ class MeridianFilterClassifier
             }
         }
 
-        $ditTurn     = isset($journeyRuns['dit_turn'])    ? (int)$journeyRuns['dit_turn']    : null;
-        $handoff     = isset($journeyRuns['handoff_turn']) ? (int)$journeyRuns['handoff_turn'] : null;
-        $t4Winner    = $journeyRuns['t4_winner'] ?? null;
+        // journey_runs is stored by the worker with camelCase keys.
+        // Support both camelCase (worker output) and snake_case (future normalised format).
+        $ditTurn  = isset($journeyRuns['ditTurn'])     ? (int)$journeyRuns['ditTurn']
+                  : (isset($journeyRuns['dit_turn'])   ? (int)$journeyRuns['dit_turn']   : null);
+        $handoff  = isset($journeyRuns['handoffTurn'])  ? (int)$journeyRuns['handoffTurn']
+                  : (isset($journeyRuns['handoff_turn'])? (int)$journeyRuns['handoff_turn']: null);
+        $t4Winner = $journeyRuns['displacingBrand'] ?? $journeyRuns['t4_winner'] ?? null;
+        $probeMode = $journeyRuns['probeMode'] ?? $journeyRuns['probe_mode'] ?? 'anchored';
+        $turns     = $journeyRuns['totalTurns'] ?? $journeyRuns['turns'] ?? null;
+        $termType  = $journeyRuns['terminationType'] ?? $journeyRuns['termination'] ?? null;
+
         $survivalGap = ($ditTurn !== null && $handoff !== null) ? $handoff - $ditTurn : null;
 
-        $probeType = isset($journeyRuns['probe_mode']) && $journeyRuns['probe_mode'] === 'generic'
-            ? 'spontaneous_consideration' : 'decision_stage';
+        $probeType = ($probeMode === 'generic') ? 'spontaneous_consideration' : 'decision_stage';
 
         $syntheticRun = (object)[
             'id'               => 0,
             'platform'         => $platform,
-            'probe_mode'       => $journeyRuns['probe_mode'] ?? 'anchored',
+            'probe_mode'       => $probeMode,
             'instrument'       => $journeyRuns['instrument'] ?? 'BJP-D',
             'dit_turn'         => $ditTurn,
             'handoff_turn'     => $handoff,
             't4_winner'        => $t4Winner,
-            'turns_completed'  => $journeyRuns['turns'] ?? null,
-            'termination_type' => $journeyRuns['termination'] ?? null,
+            'turns_completed'  => $turns,
+            'termination_type' => $term,
         ];
 
         // If we have journey_runs data with DIT info, build a synthetic transcript
@@ -410,13 +417,14 @@ class MeridianFilterClassifier
         $lines[] = "Note: Turn-level transcript unavailable. Classification based on probe run summary data.";
         $lines[] = "";
 
-        $ditTurn   = $journeyRuns['dit_turn']    ?? null;
-        $handoff   = $journeyRuns['handoff_turn'] ?? null;
-        $t4Winner  = $journeyRuns['t4_winner']   ?? null;
-        $turns     = $journeyRuns['turns']        ?? null;
-        $probeMode = $journeyRuns['probe_mode']  ?? 'anchored';
-        $term      = $journeyRuns['termination'] ?? null;
-        $score     = $journeyRuns['score']       ?? null;
+        // Support both camelCase (worker output) and snake_case keys
+        $ditTurn   = $journeyRuns['ditTurn']       ?? $journeyRuns['dit_turn']    ?? null;
+        $handoff   = $journeyRuns['handoffTurn']   ?? $journeyRuns['handoff_turn'] ?? null;
+        $t4Winner  = $journeyRuns['displacingBrand']?? $journeyRuns['t4_winner']  ?? null;
+        $turns     = $journeyRuns['totalTurns']    ?? $journeyRuns['turns']        ?? null;
+        $probeMode = $journeyRuns['probeMode']     ?? $journeyRuns['probe_mode']   ?? 'anchored';
+        $term      = $journeyRuns['terminationType']?? $journeyRuns['termination'] ?? null;
+        $score     = $journeyRuns['score']         ?? null;
 
         $lines[] = "=== PROBE RUN SUMMARY ===";
         $lines[] = "Probe mode: {$probeMode}";
