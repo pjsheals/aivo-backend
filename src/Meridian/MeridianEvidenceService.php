@@ -33,13 +33,23 @@ class MeridianEvidenceService
     ];
 
     private const TIER1_DOMAINS = [
+        // Academic & regulatory (pharma/regulated industries)
         'pubmed.ncbi.nlm.nih.gov', 'ncbi.nlm.nih.gov',
         'doi.org', 'zenodo.org',
         'fda.gov', 'ema.europa.eu', 'mhra.gov.uk',
         'clinicaltrials.gov',
         'journals.plos.org', 'nature.com', 'sciencedirect.com',
         'jamanetwork.com', 'bmj.com', 'thelancet.com',
-        'dermatologyresearch.net', 'jaad.org',
+        // Technology & SaaS authority sources
+        'g2.com', 'capterra.com', 'gartner.com', 'forrester.com',
+        'techcrunch.com', 'venturebeat.com', 'producthunt.com',
+        'wired.com', 'theverge.com', 'technologyreview.mit.edu',
+        // Business & marketing authority
+        'forbes.com', 'hbr.org', 'mckinsey.com',
+        'marketingland.com', 'searchengineland.com', 'searchenginejournal.com',
+        // General press (high authority)
+        'ft.com', 'bloomberg.com', 'reuters.com', 'wsj.com',
+        'theguardian.com', 'bbc.co.uk', 'economist.com',
     ];
 
     private const PROBE_TYPE_LABELS = [
