@@ -62,6 +62,14 @@ class MeridianClassifierController
     /**
      * POST /api/meridian/classify/all
      * Body: { "audit_id": 123 }
+     *
+     * Classifies every platform × probe_mode combination that has a completed
+     * (or any status) probe run for this audit. A Full Suite audit produces
+     * anchored + generic modes per platform, so this generates up to 6
+     * classifications rather than just 3 — giving a complete picture of
+     * where the brand is displaced differently across modes.
+     *
+     * Results are keyed as "{platform}_{mode}" e.g. "chatgpt_anchored".
      */
     public function classifyAll(): void
     {
@@ -87,15 +95,44 @@ class MeridianClassifierController
             return;
         }
 
+        // Get all distinct platform × probe_mode combinations for this audit.
+        // Prefer completed runs but fall back to any status so the classifier's
+        // journey_runs fallback path can handle incomplete probe data.
+        $probeRuns = DB::table('meridian_probe_runs')
+            ->where('audit_id', $auditId)
+            ->whereIn('platform', ['chatgpt', 'gemini', 'perplexity'])
+            ->select('platform', 'probe_mode')
+            ->distinct()
+            ->get();
+
+        if ($probeRuns->isEmpty()) {
+            json_response([
+                'success' => false,
+                'error'   => 'No probe runs found for this audit.',
+                'data'    => [],
+                'errors'  => [],
+            ]);
+            return;
+        }
+
         $classifier = new MeridianFilterClassifier();
         $results    = [];
         $errors     = [];
 
-        foreach (['chatgpt', 'gemini', 'perplexity'] as $platform) {
+        foreach ($probeRuns as $run) {
+            $platform  = $run->platform;
+            $probeMode = $run->probe_mode;
+            $key       = $platform . '_' . $probeMode;
+
             try {
-                $results[$platform] = $classifier->classify($auditId, $platform);
+                $results[$key] = $classifier->classifyByMode($auditId, $platform, $probeMode);
             } catch (\Throwable $e) {
-                $errors[$platform] = $e->getMessage();
+                $errors[$key] = $e->getMessage();
+                log_error('[MeridianClassifier] classifyAll error', [
+                    'platform'  => $platform,
+                    'probe_mode'=> $probeMode,
+                    'error'     => $e->getMessage(),
+                ]);
             }
         }
 
@@ -140,6 +177,7 @@ class MeridianClassifierController
             return [
                 'id'                     => $row->id,
                 'platform'               => $row->platform,
+                'probe_type'             => $row->probe_type,
                 'primary_filter'         => $row->primary_filter,
                 'secondary_filters'      => json_decode($row->secondary_filters ?? '[]', true),
                 'reasoning_stage'        => $row->reasoning_stage,
