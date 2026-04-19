@@ -653,7 +653,7 @@ REQUIRED STRUCTURE
 
 # {brand name} — AI Brand Intelligence
 # Optimised by AIVO Meridian Displacement Intelligence Engine
-# Generated: {today}
+# Generated: " . date('Y-m-d') . "
 # Standard: llms.txt / AIVO Meridian MAS 1.1
 
 > {One precise sentence: what this brand is and what specific capability it provides. 
