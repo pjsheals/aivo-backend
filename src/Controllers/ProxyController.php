@@ -45,7 +45,7 @@ class ProxyController
             ],
             'grok' => [
                 'url'    => 'https://api.x.ai/v1/chat/completions',
-                'model' => 'grok-4-1-fast-non-reasoning',
+                'model'  => 'grok-4-1-fast-non-reasoning',
                 'format' => 'openai',
                 'key'    => env('GROK_API_KEY'),
             ],
@@ -100,8 +100,8 @@ class ProxyController
 
         } else { // anthropic
             $body_json = json_encode([
-    'model'      => $cfg['model'],
-    'max_tokens' => $body['max_tokens'] ?? 480,
+                'model'      => $cfg['model'],
+                'max_tokens' => $body['max_tokens'] ?? 480,
                 'stream'     => true,
                 'system'     => $system,
                 'messages'   => $messages,
@@ -114,12 +114,18 @@ class ProxyController
             $url = $cfg['url'];
         }
 
-        // ── Stream response back to HTML ─────────────────────────
+        // ── Stream response back to worker/client ────────────────
         header('Content-Type: text/event-stream');
         header('Cache-Control: no-cache');
         header('X-Accel-Buffering: no');
 
-        $format = $cfg['format'];
+        $format       = $cfg['format'];
+        $isPerplexity = ($platform === 'perplexity');
+
+        // Perplexity sends citations in a non-streaming field on the final chunk.
+        // We buffer the full response to extract them, then emit a single
+        // synthetic SSE event with the citation list before [DONE].
+        $perplexityBuffer = '';
 
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -128,22 +134,39 @@ class ProxyController
             CURLOPT_HTTPHEADER     => $headers,
             CURLOPT_RETURNTRANSFER => false,
             CURLOPT_TIMEOUT        => 60,
-            CURLOPT_WRITEFUNCTION  => function ($ch, $chunk) use ($format) {
+            CURLOPT_WRITEFUNCTION  => function ($ch, $chunk) use ($format, $isPerplexity, &$perplexityBuffer) {
                 foreach (explode("\n", $chunk) as $line) {
                     $line = trim($line);
                     if (!str_starts_with($line, 'data: ')) continue;
                     $data = substr($line, 6);
+
                     if ($data === '[DONE]') {
+                        // For Perplexity: extract and emit citations before closing
+                        if ($isPerplexity && $perplexityBuffer) {
+                            $citations = $this->extractPerplexityCitations($perplexityBuffer);
+                            if (!empty($citations)) {
+                                $citEvent = json_encode(['citations' => $citations]);
+                                echo "data: {$citEvent}\n\n";
+                                if (ob_get_level() > 0) ob_flush();
+                                flush();
+                            }
+                        }
                         echo "data: [DONE]\n\n";
                         if (ob_get_level() > 0) ob_flush();
                         flush();
                         continue;
                     }
+
                     try {
                         $tok = null;
                         if ($format === 'openai') {
                             $parsed = json_decode($data, true);
                             $tok    = $parsed['choices'][0]['delta']['content'] ?? null;
+
+                            // Buffer Perplexity chunks to extract citations later
+                            if ($isPerplexity) {
+                                $perplexityBuffer .= $data . "\n";
+                            }
 
                         } elseif ($format === 'gemini') {
                             $parsed = json_decode($data, true);
@@ -178,5 +201,51 @@ class ProxyController
         curl_exec($ch);
         curl_close($ch);
         exit;
+    }
+
+    /**
+     * Extract Perplexity citation URLs from buffered SSE chunks.
+     * Perplexity includes citations in the final delta chunk and/or
+     * in a top-level 'citations' field on the completion chunk.
+     */
+    private function extractPerplexityCitations(string $buffer): array
+    {
+        $citations = [];
+        $lines     = explode("\n", $buffer);
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (!$line) continue;
+            $parsed = json_decode($line, true);
+            if (!$parsed) continue;
+
+            // Top-level citations array (final chunk)
+            if (!empty($parsed['citations']) && is_array($parsed['citations'])) {
+                foreach ($parsed['citations'] as $c) {
+                    if (is_string($c) && filter_var($c, FILTER_VALIDATE_URL)) {
+                        $citations[] = $c;
+                    } elseif (is_array($c) && !empty($c['url'])) {
+                        $citations[] = $c['url'];
+                    }
+                }
+            }
+
+            // Citations in delta
+            if (!empty($parsed['choices'][0]['delta']['citations'])) {
+                foreach ($parsed['choices'][0]['delta']['citations'] as $c) {
+                    if (is_string($c)) $citations[] = $c;
+                    elseif (is_array($c) && !empty($c['url'])) $citations[] = $c['url'];
+                }
+            }
+
+            // Search results format
+            if (!empty($parsed['search_results']) && is_array($parsed['search_results'])) {
+                foreach ($parsed['search_results'] as $r) {
+                    if (!empty($r['url'])) $citations[] = $r['url'];
+                }
+            }
+        }
+
+        return array_values(array_unique(array_filter($citations)));
     }
 }
