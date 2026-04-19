@@ -20,16 +20,23 @@ class MeridianAuditController
     // Accepted platform keys
     private const PLATFORMS = ['chatgpt', 'gemini', 'perplexity'];
 
-    // Default directed DPA prompts (used if client doesn't supply custom ones)
+    // Default directed DPA prompts (used if client doesn't supply custom ones).
+    //
+    // IMPORTANT: These defaults must be genuinely category-agnostic.
+    // T1 is always supplied by the user for their specific brand and category.
+    // T2/T3/T4 fall back to these defaults — they must never contain
+    // category-specific language (e.g. skincare, clinical ingredients,
+    // "visible results") that would override the user's intent.
+    // [Brand] and [Category] placeholders are substituted at runtime.
     private const DEFAULT_PROMPTS = [
-        'anchored_t1' => "I've been looking at [Brand] for my [Category] routine. Can you tell me about it?",
-        'anchored_t2' => "How does it compare to other products at a similar price point?",
-        'anchored_t3' => "I need a product with clinically proven ingredients, visible results within 4 weeks, effective formulation, good value, and strong reviews. Which option is best for me?",
-        'anchored_t4' => "Based on everything we've discussed, what would you recommend I buy and where can I get it from?",
-        'generic_t1'  => "I'm looking for the best [Category] product with clinically proven ingredients. What would you recommend?",
-        'generic_t2'  => "What are the top options in this category right now?",
-        'generic_t3'  => "I need something with clinical proof, visible results within 4 weeks, good value, strong reviews, and widely available. Which product fits best?",
-        'generic_t4'  => "Based on everything we've discussed, what would you recommend I buy and where can I get it from?",
+        'anchored_t1' => "I've been looking at [Brand] for [Category]. Can you tell me about it?",
+        'anchored_t2' => "How does [Brand] compare to the other options available in this space?",
+        'anchored_t3' => "I need to make a decision. Thinking about proven effectiveness, value for money, reputation, and ease of access — which option would you recommend?",
+        'anchored_t4' => "Based on everything we've discussed, what would you recommend I go with and where can I get it?",
+        'generic_t1'  => "I'm looking for the best [Category] solution available. What would you recommend?",
+        'generic_t2'  => "What are the leading options in this space right now?",
+        'generic_t3'  => "I need to make a final decision based on proven effectiveness, overall value, reputation, and ease of access. Which option fits best?",
+        'generic_t4'  => "Based on everything we've discussed, what would you recommend and where can I get it?",
     ];
 
     // ── POST /api/meridian/audits/initiate ───────────────────────
@@ -43,8 +50,8 @@ class MeridianAuditController
         $platforms = isset($body['platforms'])   ? (array)$body['platforms'] : self::PLATFORMS;
         $prompts   = isset($body['prompts'])     ? (array)$body['prompts']   : [];
 
-        // ── FIX: Store user-supplied audit label in initiated_by ──
-        // Falls back to 'manual' if no label provided
+        // Store user-supplied audit label in initiated_by.
+        // Falls back to 'manual' if no label provided.
         $auditLabel = isset($body['audit_label']) && trim($body['audit_label']) !== ''
             ? trim($body['audit_label'])
             : 'manual';
@@ -90,8 +97,6 @@ class MeridianAuditController
         }
 
         // ── Enforce monthly audit allowance ───────────────────────
-        // Boutique=NULL, Studio=NULL, Network=NULL (unlimited at all tiers currently).
-        // This check activates automatically if allowance is set on the agency row.
         $monthlyAllowance = $auth->agency->monthly_audit_allowance ?? null;
         if ($monthlyAllowance !== null) {
             $auditsThisMonth = DB::table('meridian_audits')
@@ -121,6 +126,8 @@ class MeridianAuditController
         }
 
         // ── Merge custom prompts over defaults ────────────────────
+        // User supplies T1 (anchored + generic + undirected).
+        // T2/T3/T4 always use the category-agnostic defaults unless explicitly overridden.
         $resolvedPrompts = self::DEFAULT_PROMPTS;
         foreach ($prompts as $key => $value) {
             if (!empty(trim((string)$value))) {
@@ -174,8 +181,10 @@ class MeridianAuditController
             if (in_array($instrumentType, ['undirected_bjp', 'full'], true)) {
                 $udirAnchored = (bool)($undirectedConfig['anchored'] ?? true);
                 $udirGeneric  = (bool)($undirectedConfig['generic']  ?? false);
-                $udirT1       = $resolvedPrompts['undirected_t1']
-                    ?? "I've been looking at {$brandName} for my {$category} routine. Can you tell me about it?";
+
+                // Undirected T1 fallback is category-agnostic (no "routine" language)
+                $udirT1 = $resolvedPrompts['undirected_t1']
+                    ?? "I've been looking at {$brandName} for {$category}. Can you tell me about it?";
 
                 if ($udirAnchored) {
                     $probeRunsToCreate[] = [
@@ -195,7 +204,7 @@ class MeridianAuditController
                 }
 
                 if ($udirGeneric) {
-                    $genericT1 = "I'm looking for a recommendation for a {$category}. What would you suggest?";
+                    $genericT1 = "I'm looking for a recommendation for {$category}. What would you suggest?";
                     $probeRunsToCreate[] = [
                         'platform'   => $platform,
                         'probe_mode' => 'generic',
@@ -216,7 +225,7 @@ class MeridianAuditController
 
         $probesTotal = in_array($instrumentType, ['psos'], true) ? 1 : count($probeRunsToCreate);
 
-        // ── Methodology version — use latest if available, null if not ──
+        // ── Methodology version ───────────────────────────────────
         $methodologyVersion = DB::table('meridian_methodology_versions')
             ->orderBy('id', 'desc')->first();
         $methodologyVersionId = $methodologyVersion ? $methodologyVersion->id : null;
@@ -231,7 +240,7 @@ class MeridianAuditController
                 'audit_type'             => $instrumentType,
                 'status'                 => 'queued',
                 'initiated_by_user_id'   => $auth->user_id,
-                'initiated_by'           => $auditLabel,  // ← stores user label or 'manual'
+                'initiated_by'           => $auditLabel,
                 'methodology_version_id' => $methodologyVersionId,
                 'platforms'              => json_encode($platforms),
                 'probes_total'           => $probesTotal,
