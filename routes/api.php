@@ -204,7 +204,8 @@ $routes = [
         '/api/meridian/publish/manual-submitted' => [MeridianPublicationController::class, 'markManualSubmitted'],
 
         // ── Meridian: Crawler Instructions ────────────────────
-        '/api/meridian/crawler/generate'       => [MeridianCrawlerController::class, 'generate'],
+        '/api/meridian/crawler/generate'           => [MeridianCrawlerController::class, 'generate'],
+        '/api/meridian/crawler/generate-optimised' => [MeridianCrawlerController::class, 'generateOptimised'],
 
         // ── Meridian: Brand Intelligence Packages (M9) ────────
         '/api/meridian/package/generate'       => [MeridianPackageController::class, 'generate'],
