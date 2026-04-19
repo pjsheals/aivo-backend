@@ -570,6 +570,7 @@ class MeridianCrawlerGenerator
         array  $atomSummary,
         float  $rcs
     ): string {
+        $today        = date('Y-m-d');
         $brandSlug    = $this->brandSlug($brand->name);
         $brandName    = $brand->name;
         $category     = $brand->category ?? 'unknown';
@@ -653,7 +654,7 @@ REQUIRED STRUCTURE
 
 # {brand name} — AI Brand Intelligence
 # Optimised by AIVO Meridian Displacement Intelligence Engine
-# Generated: " . date('Y-m-d') . "
+# Generated: {$today}
 # Standard: llms.txt / AIVO Meridian MAS 1.1
 
 > {One precise sentence: what this brand is and what specific capability it provides. 
