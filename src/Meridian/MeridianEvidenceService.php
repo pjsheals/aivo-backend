@@ -195,17 +195,10 @@ class MeridianEvidenceService
     }
 
     // -------------------------------------------------------------------------
-    // Get gap completion status — Stage 1 updated version
+    // Get gap completion status
     //
-    // Now returns full displacement context per gap:
-    // - probe_type (awareness / decision_stage / spontaneous_consideration)
-    // - displacement_turn (when the brand was displaced)
-    // - handoff_turn (when the commercial moment occurs)
-    // - survival_gap (turns between displacement and handoff = revenue exposure)
-    // - displacement_criteria (the specific question that caused routing away)
-    // - displacing_brand (who captured the routing)
-    // - platforms affected
-    // - full evidence submission list per gap
+    // Returns full displacement context per gap including mechanism_explanation
+    // so the frontend can render the "Understanding this gap" section.
     // -------------------------------------------------------------------------
 
     public function getGapCompletionStatus(int $brandId, int $auditId): array
@@ -225,51 +218,83 @@ class MeridianEvidenceService
             ];
         }
 
-        // Build gap map — one entry per filter, aggregating across platforms
-        // A filter can appear on multiple platforms with different displacement context
+        // Build gap map — one entry per filter, aggregating across platforms.
+        // When classifyAll runs per platform × mode, multiple classifications
+        // can exist for the same filter. We keep the most urgent (highest
+        // survival_gap) and accumulate all affected platforms.
         $gapMap = [];
 
         foreach ($classifications as $c) {
             $gapData = json_decode($c->evidence_gaps ?? '[]', true);
 
+            // Extract mechanism_explanation from DB — stored as JSON
+            $mechanismExplanation = null;
+            if (!empty($c->mechanism_explanation)) {
+                $decoded = json_decode($c->mechanism_explanation, true);
+                if (is_array($decoded)) {
+                    $mechanismExplanation = $decoded;
+                }
+            }
+
+            // Extract probe_mode from classifier_output metadata if available
+            $probeMode = null;
+            if (!empty($c->classifier_output)) {
+                $co = json_decode($c->classifier_output, true);
+                if (isset($co['_probe_mode'])) {
+                    $probeMode = $co['_probe_mode'];
+                }
+            }
+
             foreach ($gapData as $gap) {
                 $filter = $gap['filter'] ?? null;
                 if (!$filter) continue;
 
-                $key = $filter; // one gap card per filter (aggregated across platforms)
+                $key = $filter;
 
                 if (!isset($gapMap[$key])) {
                     $gapMap[$key] = [
-                        'filter'                => $filter,
-                        'gap_description'       => $gap['gap'] ?? '',
-                        'probe_type'            => $c->probe_type ?? 'decision_stage',
-                        'probe_type_label'      => self::PROBE_TYPE_LABELS[$c->probe_type ?? 'decision_stage'] ?? 'Decision-Stage',
-                        'displacement_turn'     => $c->dit_turn     ? (int)$c->dit_turn     : null,
-                        'handoff_turn'          => $c->handoff_turn ? (int)$c->handoff_turn : null,
-                        'survival_gap'          => $c->survival_gap ? (int)$c->survival_gap : null,
-                        'displacement_criteria' => $c->displacement_criteria ?? null,
-                        'displacement_mechanism'=> $c->displacement_mechanism ?? null,
-                        'displacing_brand'      => $c->t4_winner   ?? null,
-                        'platforms_affected'    => [],
-                        'primary_filter'        => $c->primary_filter ?? $filter,
-                        'confidence'            => (int)($c->confidence_score ?? 0),
+                        'filter'                 => $filter,
+                        'gap_description'        => $gap['gap'] ?? '',
+                        'probe_type'             => $c->probe_type ?? 'decision_stage',
+                        'probe_type_label'       => self::PROBE_TYPE_LABELS[$c->probe_type ?? 'decision_stage'] ?? 'Decision-Stage',
+                        'probe_mode'             => $probeMode,
+                        'displacement_turn'      => $c->dit_turn     ? (int)$c->dit_turn     : null,
+                        'handoff_turn'           => $c->handoff_turn ? (int)$c->handoff_turn : null,
+                        'survival_gap'           => $c->survival_gap ? (int)$c->survival_gap : null,
+                        'displacement_criteria'  => $c->displacement_criteria  ?? null,
+                        'displacement_mechanism' => $c->displacement_mechanism ?? null,
+                        'displacing_brand'       => $c->t4_winner ?? null,
+                        'platforms_affected'     => [],
+                        'primary_filter'         => $c->primary_filter ?? $filter,
+                        'confidence'             => (int)($c->confidence_score ?? 0),
+                        'mechanism_explanation'  => $mechanismExplanation,
                     ];
                 }
 
-                // Add platform to affected list
+                // Accumulate affected platforms
                 if (!in_array($c->platform, $gapMap[$key]['platforms_affected'])) {
                     $gapMap[$key]['platforms_affected'][] = $c->platform;
                 }
 
-                // If this platform has a worse survival gap, use it (most urgent)
+                // Use most urgent survival gap
                 $existingGap = $gapMap[$key]['survival_gap'];
                 $thisGap     = $c->survival_gap ? (int)$c->survival_gap : null;
                 if ($thisGap !== null && ($existingGap === null || $thisGap > $existingGap)) {
                     $gapMap[$key]['survival_gap']           = $thisGap;
                     $gapMap[$key]['displacement_turn']      = $c->dit_turn     ? (int)$c->dit_turn     : null;
                     $gapMap[$key]['handoff_turn']           = $c->handoff_turn ? (int)$c->handoff_turn : null;
-                    $gapMap[$key]['displacement_criteria']  = $c->displacement_criteria ?? $gapMap[$key]['displacement_criteria'];
-                    $gapMap[$key]['displacing_brand']       = $c->t4_winner    ?? $gapMap[$key]['displacing_brand'];
+                    $gapMap[$key]['displacement_criteria']  = $c->displacement_criteria  ?? $gapMap[$key]['displacement_criteria'];
+                    $gapMap[$key]['displacing_brand']       = $c->t4_winner               ?? $gapMap[$key]['displacing_brand'];
+                }
+
+                // Use mechanism_explanation from the classification with highest confidence
+                if ($mechanismExplanation !== null) {
+                    $existingConf = $gapMap[$key]['confidence'] ?? 0;
+                    $thisConf     = (int)($c->confidence_score ?? 0);
+                    if ($thisConf >= $existingConf) {
+                        $gapMap[$key]['mechanism_explanation'] = $mechanismExplanation;
+                        $gapMap[$key]['confidence']            = $thisConf;
+                    }
                 }
             }
         }
@@ -278,7 +303,6 @@ class MeridianEvidenceService
         $status = [];
 
         foreach ($gapMap as $filter => $gapInfo) {
-            // Load all evidence submissions for this filter
             $submissions = DB::table('meridian_evidence_submissions')
                 ->where('brand_id', $brandId)
                 ->where('audit_id', $auditId)
@@ -294,7 +318,6 @@ class MeridianEvidenceService
                 ->where('authority_score', '>=', 3)
                 ->count() > 0;
 
-            // Format evidence items for frontend
             $evidenceItems = $submissions->map(fn($s) => [
                 'id'                  => $s->id,
                 'source_type'         => $s->source_type,
@@ -319,7 +342,7 @@ class MeridianEvidenceService
             ]);
         }
 
-        // Sort by survival_gap descending (most urgent first — most turns of exposure)
+        // Sort by survival_gap descending (most urgent first)
         usort($status, function($a, $b) {
             $gapA = $a['survival_gap'] ?? -1;
             $gapB = $b['survival_gap'] ?? -1;
