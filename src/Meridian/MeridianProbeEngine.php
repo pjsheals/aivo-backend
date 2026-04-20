@@ -6,23 +6,12 @@ namespace Aivo\Meridian;
 
 use Illuminate\Database\Capsule\Manager as DB;
 
-/**
- * MeridianProbeEngine
- *
- * Executes a single DPA (Decision-stage Probe Analysis) probe run.
- * Called by the background worker — not from HTTP context.
- *
- * One probe run = one platform × one probe mode (anchored or generic).
- * Four turns per probe: T1 awareness, T2 comparison, T3 criteria, T4 purchase.
- */
 class MeridianProbeEngine
 {
-    // Internal proxy URL — localhost avoids public internet round-trip
     private string $proxyUrl;
     private string $claudeApiKey;
     private string $anthropicVersion = '2023-06-01';
 
-    // Acceptance phrases for undirected mode (reserved for future use)
     private array $acceptPhrases = [
         'Yes please', 'Go ahead', 'Sounds good, tell me more',
         'Sure, that would be helpful', 'Yes, I\'d like to know more about that',
@@ -36,79 +25,56 @@ class MeridianProbeEngine
         $this->claudeApiKey = getenv('ANTHROPIC_API_KEY') ?: '';
     }
 
-    // ── MAIN ENTRY POINT ─────────────────────────────────────────
-    /**
-     * Execute one probe run. Updates DB throughout.
-     * Returns true on success, false on fatal failure.
-     */
     public function run(int $probeRunId): bool
     {
-        // Load probe run + audit + brand
         $run = DB::table('meridian_probe_runs')->find($probeRunId);
-        if (!$run) {
-            error_log('[ProbeEngine] probe_run not found: ' . $probeRunId);
-            return false;
-        }
+        if (!$run) { error_log('[ProbeEngine] probe_run not found: ' . $probeRunId); return false; }
 
         $audit = DB::table('meridian_audits')->find($run->audit_id);
-        if (!$audit) {
-            error_log('[ProbeEngine] audit not found: ' . $run->audit_id);
-            return false;
-        }
+        if (!$audit) { error_log('[ProbeEngine] audit not found: ' . $run->audit_id); return false; }
 
         $brand = DB::table('meridian_brands')->find($run->brand_id);
-        if (!$brand) {
-            error_log('[ProbeEngine] brand not found: ' . $run->brand_id);
-            return false;
-        }
+        if (!$brand) { error_log('[ProbeEngine] brand not found: ' . $run->brand_id); return false; }
 
-        // Prompts are stored in raw_config on the probe run (no prompts col on audits)
         $rawConfig = json_decode($run->raw_config ?? '{}', true);
         $prompts   = $rawConfig['prompts']    ?? [];
         $brandName = $rawConfig['brand_name'] ?? $brand->name;
         $category  = $rawConfig['category']   ?? ($brand->category ?: 'product');
         $platform  = $run->platform;
-        $mode      = $run->probe_mode; // 'anchored' or 'generic'
+        $mode      = $run->probe_mode;
 
-        // Mark as running
         DB::table('meridian_probe_runs')->where('id', $probeRunId)->update([
             'status'     => 'running',
             'started_at' => now(),
             'updated_at' => now(),
         ]);
 
-        // Detect probe type: directed (4 fixed turns) or undirected (variable, acceptance phrases)
         $isUndirected = ($rawConfig['undirected'] ?? false) === true;
         $maxTurns     = $isUndirected ? (int)($rawConfig['max_turns'] ?? 8) : 4;
 
-        // Build prompt sequence
         $turnPrompts = $isUndirected
-            ? null  // Undirected: T1 only, rest are acceptance phrases
+            ? null
             : $this->buildTurnPrompts($mode, $prompts, $brandName, $category);
 
         $t1Prompt = $isUndirected
-            ? ($prompts['undirected_t1'] ?? "I've been looking at {$brandName} for my {$category} routine. Can you tell me about it?")
+            ? ($prompts['undirected_t1'] ?? "I've been looking at {$brandName} for {$category}. Can you tell me about it?")
             : null;
 
         $totalTurns = $maxTurns;
-
-        $messages  = [];
-        $turns     = [];
-        $ditTurn   = null;
-        $t4Winner  = null;
+        $messages   = [];
+        $turns      = [];
+        $ditTurn    = null;
+        $t4Winner   = null;
         $t4WinnerConfidence = null;
         $consecutiveConversionLoops = 0;
 
         try {
             for ($t = 0; $t < $totalTurns; $t++) {
-                $turnNum   = $t + 1;
-                $isFinal   = ($turnNum === $totalTurns);
+                $turnNum = $t + 1;
+                $isFinal = ($turnNum === $totalTurns);
 
-                // Build user message
                 if ($isUndirected) {
-                    $userMsg = ($t === 0)
-                        ? $t1Prompt
-                        : $this->randomAcceptPhrase();
+                    $userMsg = ($t === 0) ? $t1Prompt : $this->randomAcceptPhrase();
                 } else {
                     $userMsg = $turnPrompts[$t];
                 }
@@ -116,11 +82,9 @@ class MeridianProbeEngine
                 error_log("[ProbeEngine] {$platform}/{$mode} T{$turnNum} — calling model");
                 $messages[] = ['role' => 'user', 'content' => $userMsg];
 
-                // Call model via proxy (with retry)
-                $modelResult = $this->callModelWithRetry($messages, $platform);
+                $modelResult = $this->callModelWithRetry($messages, $platform, $isUndirected);
 
                 if ($modelResult === null) {
-                    // Fatal model failure on this turn
                     $turns[] = [
                         'turn_number'     => $turnNum,
                         'user_prompt'     => $userMsg,
@@ -133,7 +97,6 @@ class MeridianProbeEngine
                         '_annotation'     => null,
                         '_error'          => 'Model call failed after retry',
                     ];
-                    // For T1/T2 failures, abort this probe
                     if ($turnNum <= 2) {
                         throw new \RuntimeException("Model failure at T{$turnNum} — aborting probe");
                     }
@@ -142,29 +105,23 @@ class MeridianProbeEngine
 
                 $responseText = $modelResult['text'];
                 $citationUrls = $modelResult['citations'] ?? [];
+                $messages[]   = ['role' => 'assistant', 'content' => $responseText];
 
-                $messages[] = ['role' => 'assistant', 'content' => $responseText];
-
-                // Annotate turn with Claude
                 error_log("[ProbeEngine] {$platform}/{$mode} T{$turnNum} — annotating");
                 $annotation = $this->annotate(
                     $responseText, $brandName, $category,
-                    $turnNum, $totalTurns, $platform, false, $citationUrls
+                    $turnNum, $totalTurns, $platform, $isUndirected, $citationUrls
                 );
 
-                // Extract T4 winner
-                if ($isFinal && $annotation) {
-                    $t4Winner           = $annotation['t4_winner'] ?? null;
-                    $t4WinnerConfidence = $annotation['t4_winner_confidence'] ?? null;
-                }
-
-                // FIX: annotation null defaults to false (brand absent), not true (brand present).
-                // Previously ?? true meant a silent annotation failure would score every turn as
-                // survived, inflating probe scores to 100 and RCS to 100.
                 if ($annotation === null) {
                     error_log("[ProbeEngine] annotation null at T{$turnNum} {$platform}/{$mode} — treating brand as absent");
                 }
                 $brandSurvived = (bool)($annotation['brand_citation_survived'] ?? false);
+
+                if ($isFinal && $annotation) {
+                    $t4Winner           = $annotation['t4_winner'] ?? null;
+                    $t4WinnerConfidence = $annotation['t4_winner_confidence'] ?? null;
+                }
 
                 $ditFired = false;
                 if (!$brandSurvived && $ditTurn === null) {
@@ -172,7 +129,6 @@ class MeridianProbeEngine
                     $ditFired = true;
                 }
 
-                // Detect conversion loop (undirected: purchase/channel stage repeating)
                 if ($isUndirected && $annotation) {
                     $stage = $annotation['journey_stage'] ?? '';
                     if (in_array($stage, ['purchase', 'channel'], true)) {
@@ -185,35 +141,27 @@ class MeridianProbeEngine
                 $isAcceptPhrase = $isUndirected && $t > 0;
 
                 $turns[] = [
-                    'turn_number'        => $turnNum,
-                    'user_prompt'        => $userMsg,
-                    'model_response'     => $responseText,
-                    'citation_urls'      => json_encode([
-                        'urls'       => $citationUrls,
-                        'annotation' => $annotation,
-                    ]),
-                    'is_dit_turn'        => $ditFired,
-                    'is_handoff_turn'    => $isFinal,
+                    'turn_number'          => $turnNum,
+                    'user_prompt'          => $userMsg,
+                    'model_response'       => $responseText,
+                    'citation_urls'        => json_encode(['urls' => $citationUrls, 'annotation' => $annotation]),
+                    'is_dit_turn'          => $ditFired,
+                    'is_handoff_turn'      => $isFinal,
                     'is_acceptance_phrase' => $isAcceptPhrase,
-                    'brand_presence'     => $brandSurvived ? 'present' : 'absent',
-                    // Internal only — used for scoring, not stored as separate column
-                    '_brand_survived'    => $brandSurvived,
-                    '_annotation'        => $annotation,
-                    '_error'             => null,
+                    'brand_presence'       => $brandSurvived ? 'present' : 'absent',
+                    '_brand_survived'      => $brandSurvived,
+                    '_annotation'          => $annotation,
+                    '_error'              => null,
                 ];
 
-                // Early termination for undirected probe
                 if ($isUndirected && $annotation) {
                     $stage  = $annotation['journey_stage'] ?? '';
                     $signal = $annotation['displacement_signal'] ?? 'none';
-
-                    // Purchase conclusion reached
                     if ($stage === 'purchase' && $signal === 'complete' && $t >= 3) {
                         error_log("[ProbeEngine] Undirected early termination: purchase conclusion at T{$turnNum}");
                         $isFinal = true;
                         break;
                     }
-                    // 4 consecutive conversion loops
                     if ($consecutiveConversionLoops >= 4) {
                         error_log("[ProbeEngine] Undirected early termination: 4 consecutive conversion loops at T{$turnNum}");
                         $isFinal = true;
@@ -221,14 +169,12 @@ class MeridianProbeEngine
                     }
                 }
 
-                // Update turns_completed counter
                 DB::table('meridian_probe_runs')->where('id', $probeRunId)->update([
                     'turns_completed' => $turnNum,
                     'updated_at'      => now(),
                 ]);
             }
 
-            // Save all turns to DB — columns match meridian_probe_turns schema
             foreach ($turns as $turn) {
                 DB::table('meridian_probe_turns')->insert([
                     'probe_run_id'   => $probeRunId,
@@ -242,15 +188,12 @@ class MeridianProbeEngine
                     'is_dit_turn'    => $turn['is_dit_turn'],
                     'is_handoff_turn'=> $turn['is_handoff_turn'],
                     'brand_presence' => $turn['brand_presence'],
-                    // is_acceptance_phrase stored in raw annotation jsonb if column exists
                     'created_at'     => now(),
                 ]);
             }
 
-            // Compute probe-level score (CODA weighting)
             $probeScore = $this->computeProbeScore($turns);
 
-            // Determine DIT type from annotation
             $ditType = null;
             if ($ditTurn !== null) {
                 $ditTurnData = collect($turns)->firstWhere('turn_number', $ditTurn);
@@ -258,19 +201,18 @@ class MeridianProbeEngine
                 $ditType     = $this->inferDitType($anno);
             }
 
-            // Mark probe complete — columns match meridian_probe_runs schema
             DB::table('meridian_probe_runs')->where('id', $probeRunId)->update([
                 'status'           => 'completed',
                 'turns_completed'  => $totalTurns,
                 'dit_turn'         => $ditTurn,
-                'handoff_turn'     => $totalTurns, // T4 is always the handoff turn
+                'handoff_turn'     => $totalTurns,
                 't4_winner'        => $t4Winner,
                 'termination_type' => 'turn_limit',
                 'raw_config'       => json_encode(array_merge(
                     json_decode($run->raw_config ?? '{}', true),
                     [
-                        'probe_score' => $probeScore,
-                        'dit_type'    => $ditType,
+                        'probe_score'          => $probeScore,
+                        'dit_type'             => $ditType,
                         't4_winner_confidence' => $t4WinnerConfidence,
                     ]
                 )),
@@ -297,27 +239,39 @@ class MeridianProbeEngine
     {
         $prefix = $mode === 'anchored' ? 'anchored_' : 'generic_';
         return [
+            // T1: from user-supplied prompt (always required)
             $prompts[$prefix . 't1'] ?? "Tell me about {$brandName} for {$category}.",
-            $prompts[$prefix . 't2'] ?? "How does it compare to alternatives at a similar price?",
-            $prompts[$prefix . 't3'] ?? "I need something with proven ingredients, visible results, good reviews, value for money, and wide availability. Which option fits best?",
-            $prompts[$prefix . 't4'] ?? "Based on everything we've discussed, what would you recommend I buy and where can I get it from?",
+            // T2: comparison — category-agnostic fallback
+            $prompts[$prefix . 't2'] ?? "How does it compare to other options available in this space?",
+            // T3: criteria — category-agnostic fallback (no skincare language)
+            $prompts[$prefix . 't3'] ?? "I need to make a decision. Thinking about proven effectiveness, value for money, reputation, and ease of access — which option would you recommend?",
+            // T4: purchase — category-agnostic fallback
+            $prompts[$prefix . 't4'] ?? "Based on everything we've discussed, what would you recommend I go with and where can I get it?",
         ];
     }
 
     // ── MODEL CALL ───────────────────────────────────────────────
-    private function callModelWithRetry(array $messages, string $platform, int $maxRetries = 2): ?array
+
+    /**
+     * Call model with retry. Gemini uses a longer retry delay (15s vs 5s)
+     * because it rate-limits more aggressively than ChatGPT/Perplexity,
+     * especially when multiple audits run concurrently.
+     */
+    private function callModelWithRetry(array $messages, string $platform, bool $isUndirected = false, int $maxRetries = 2): ?array
     {
-        // Keep window to last 7 messages (T1 + last 3 pairs) to avoid size limits
-        $trimmed = $this->trimMessages($messages, 3);
+        $trimmed    = $this->trimMessages($messages, 3);
+        $retryDelay = ($platform === 'gemini') ? 15 : 5;
 
         for ($attempt = 0; $attempt < $maxRetries; $attempt++) {
             if ($attempt > 0) {
-                error_log("[ProbeEngine] retry {$attempt} for {$platform}");
-                sleep(5);
+                error_log("[ProbeEngine] retry {$attempt} for {$platform} (delay {$retryDelay}s)");
+                sleep($retryDelay);
             }
             $result = $this->callProxy($trimmed, $platform);
             if ($result !== null) return $result;
         }
+
+        error_log("[ProbeEngine] {$platform} failed after {$maxRetries} attempts");
         return null;
     }
 
@@ -358,11 +312,10 @@ class MeridianProbeEngine
             return null;
         }
 
-        // Proxy returns SSE stream — parse it
-        return $this->parseSseStream($raw);
+        return $this->parseSseStream($raw, $platform);
     }
 
-    private function parseSseStream(string $raw): ?array
+    private function parseSseStream(string $raw, string $platform = ''): ?array
     {
         $text      = '';
         $citations = [];
@@ -380,17 +333,15 @@ class MeridianProbeEngine
             $chunk = $obj['choices'][0]['delta']['content'] ?? null;
             if ($chunk) $text .= $chunk;
 
-            // Perplexity citation fields
-            if (!empty($obj['citations'])) $citations = $obj['citations'];
-            if (!empty($obj['choices'][0]['delta']['citations'])) $citations = $obj['choices'][0]['delta']['citations'];
+            if (!empty($obj['citations']))                             $citations = $obj['citations'];
+            if (!empty($obj['choices'][0]['delta']['citations']))   $citations = $obj['choices'][0]['delta']['citations'];
             if (!empty($obj['search_results'])) {
-                $citations = array_map(fn($r) => $r['url'] ?? '', $obj['search_results']);
-                $citations = array_filter($citations);
+                $citations = array_filter(array_map(fn($r) => $r['url'] ?? '', $obj['search_results']));
             }
         }
 
         if (!$text) {
-            error_log('[ProbeEngine] empty response from SSE stream');
+            error_log("[ProbeEngine] empty SSE response from {$platform} — raw length=" . strlen($raw));
             return null;
         }
 
@@ -413,7 +364,19 @@ class MeridianProbeEngine
             return null;
         }
 
-        $turnContext = "This is turn {$turnNum} of a {$totalTurns}-turn directed DPA probe: T1=baseline perception, T2=comparison expansion, T3=five-criteria optimisation (displacement trigger), T4=purchase decision.";
+        // Turn context is instrument-aware:
+        // Directed probes have fixed turn purposes (T3 = criteria/displacement trigger).
+        // Agentic/undirected probes are AI-driven — there is no fixed T3 trigger point.
+        // Using directed language for agentic probes produces misleading findings.
+        if ($isUndirected) {
+            $turnContext = "This is turn {$turnNum} of a {$totalTurns}-turn agentic probe where the AI drives the conversation. "
+                . "The consumer's opening message was the only scripted turn — all subsequent turns used acceptance phrases. "
+                . "There is no fixed displacement trigger turn. The DIT (Displacement Initiation Turn) is wherever "
+                . "the brand first loses primary position, which can occur at any turn.";
+        } else {
+            $turnContext = "This is turn {$turnNum} of a {$totalTurns}-turn directed DPA probe: "
+                . "T1=baseline perception, T2=comparison expansion, T3=criteria evaluation, T4=purchase decision.";
+        }
 
         $urlCtx = '';
         if (!empty($citationUrls)) {
@@ -423,7 +386,7 @@ class MeridianProbeEngine
             }
         }
 
-        $isFinal  = ($turnNum === $totalTurns);
+        $isFinal   = ($turnNum === $totalTurns);
         $t4Context = $isFinal
             ? "\n\nThis is the PURCHASE DECISION turn. Extract: (1) which brand is explicitly recommended for purchase — this is the T4 winner even if it is not {$brand}; (2) destination quality — where the consumer is routed for purchase; (3) whether {$brand} is present at all."
             : '';
@@ -449,7 +412,7 @@ Return ONLY valid JSON, no markdown:
   "brand_citation_survived":true/false,
   "displacement_signal":"none|partial|complete",
   "journey_stage":"awareness|comparison|criteria|purchase",
-  "key_finding":"one sentence identifying the most important citation insight for this turn",
+  "key_finding":"one sentence identifying the most important citation insight for this turn — do not reference 'T3 displacement trigger' for agentic probes",
   "t4_winner":PLACEHOLDER_WINNER,
   "t4_winner_confidence":PLACEHOLDER_CONFIDENCE,
   "destination_type":PLACEHOLDER_DEST_TYPE,
@@ -457,7 +420,6 @@ Return ONLY valid JSON, no markdown:
 }
 PROMPT;
 
-        // Fill T4 placeholders
         if ($isFinal) {
             $prompt = str_replace(
                 ['PLACEHOLDER_WINNER', 'PLACEHOLDER_CONFIDENCE', 'PLACEHOLDER_DEST_TYPE', 'PLACEHOLDER_DEST_SITES'],
@@ -505,15 +467,13 @@ PROMPT;
             return null;
         }
 
-        $data = json_decode($raw, true);
-        $text = $data['content'][0]['text'] ?? '';
-
-        // Strip markdown fences if present
-        $text = preg_replace('/^```json\s*/m', '', $text);
-        $text = preg_replace('/^```\s*/m', '', $text);
-        $text = trim($text);
-
+        $data   = json_decode($raw, true);
+        $text   = $data['content'][0]['text'] ?? '';
+        $text   = preg_replace('/^```json\s*/m', '', $text);
+        $text   = preg_replace('/^```\s*/m', '', $text);
+        $text   = trim($text);
         $result = json_decode($text, true);
+
         if (!$result) {
             error_log('[ProbeEngine] annotation JSON parse failed: ' . substr($text, 0, 200));
             return null;
@@ -523,31 +483,18 @@ PROMPT;
     }
 
     // ── SCORING ──────────────────────────────────────────────────
-    /**
-     * CODA scoring: T1=15, T2=15, T3=20, T4=50 points (max 100 per probe)
-     * Score based on brand_citation_survived per turn.
-     */
     public function computeProbeScore(array $turns): int
     {
         $weights = [1 => 15, 2 => 15, 3 => 20, 4 => 50];
         $score   = 0;
-
         foreach ($turns as $turn) {
             $t        = (int)($turn['turn_number'] ?? 0);
             $survived = (bool)($turn['_brand_survived'] ?? false);
-            if ($survived && isset($weights[$t])) {
-                $score += $weights[$t];
-            }
+            if ($survived && isset($weights[$t])) $score += $weights[$t];
         }
-
         return $score;
     }
 
-    /**
-     * Overall RCS from all completed probe runs for an audit.
-     * Weighted: anchored probes × 0.7, generic probes × 0.3
-     * Average across platforms.
-     */
     public function computeAuditRcs(int $auditId): int
     {
         $runs = DB::table('meridian_probe_runs')
@@ -557,7 +504,6 @@ PROMPT;
 
         if ($runs->isEmpty()) return 0;
 
-        // probe_score is stored in raw_config jsonb (no dedicated column)
         $anchoredScores = [];
         $genericScores  = [];
 
@@ -565,23 +511,16 @@ PROMPT;
             $rc    = json_decode($run->raw_config ?? '{}', true);
             $score = $rc['probe_score'] ?? null;
             if ($score === null) continue;
-
-            if ($run->probe_mode === 'anchored') {
-                $anchoredScores[] = (int)$score;
-            } else {
-                $genericScores[] = (int)$score;
-            }
+            if ($run->probe_mode === 'anchored') $anchoredScores[] = (int)$score;
+            else $genericScores[] = (int)$score;
         }
 
         $anchoredAvg = count($anchoredScores) > 0 ? array_sum($anchoredScores) / count($anchoredScores) : 0;
         $genericAvg  = count($genericScores)  > 0 ? array_sum($genericScores)  / count($genericScores)  : 0;
 
-        $rcs = ($anchoredAvg * 0.70) + ($genericAvg * 0.30);
-        return (int)round($rcs);
+        return (int)round(($anchoredAvg * 0.70) + ($genericAvg * 0.30));
     }
 
-    // FIX: middle band changed from 'monitor' to 'advertise_with_caution' to match
-    // the three-category verdict system in MeridianBrandController and run_audit.php.
     public function determineVerdict(int $rcs): string
     {
         if ($rcs >= 70) return 'amplification_ready';
@@ -594,7 +533,6 @@ PROMPT;
     {
         if (!$this->claudeApiKey) return null;
 
-        // Gather T4 data per platform
         $runs = DB::table('meridian_probe_runs')
             ->where('audit_id', $auditId)
             ->where('status', 'completed')
@@ -611,11 +549,10 @@ PROMPT;
             $t1 = $turns->firstWhere('turn_number', 1);
             if (!$t4) continue;
 
-            // annotation stored in citation_urls jsonb as {'urls':[], 'annotation':{}}
             $t4CitData = json_decode($t4->citation_urls ?? '{}', true);
             $t1CitData = json_decode($t1->citation_urls ?? '{}', true);
-            $t4Anno = $t4CitData['annotation'] ?? [];
-            $t1Anno = $t1CitData['annotation'] ?? [];
+            $t4Anno    = $t4CitData['annotation'] ?? [];
+            $t1Anno    = $t1CitData['annotation'] ?? [];
 
             $t4Summary[] = [
                 'platform'         => $run->platform,
@@ -643,7 +580,7 @@ CONTEXT: DPA runs a 4-turn buying conversation: T1=awareness, T2=comparison, T3=
 
 PLATFORM REASONING PATTERNS (apply these when building platform-specific interventions):
 - ChatGPT: Training data citations. Displacement is structural. T1/T2 citation architecture interventions take 8-16 weeks to propagate. T3 volatile content has no effect.
-- Gemini: Educational Drift Arc pattern. Displaces via clinical/educational framing at T2-T3. Requires brand-specific content density and clinical credibility in training data. Different fix from ChatGPT.
+- Gemini: Educational Drift Arc pattern. Displaces via educational/authority framing at T2-T3. Requires brand-specific content density and authority evidence in training data. Different fix from ChatGPT.
 - Perplexity: Live web retrieval. Displacement is volatile — can be addressed in 2-4 weeks via T3 content. Citation URLs are direct evidence of what is driving displacement.
 - Grok: Requires primary criterion ownership and definitional authority.
 
@@ -665,21 +602,21 @@ Return ONLY valid JSON:
   "brand_gaps": ["T4 source types where brand is absent"],
   "platform_analysis": {
     "chatgpt": {
-      "dit_turn": null_or_number,
+      "dit_turn": null,
       "t4_winner": "competitor name or brand name or null",
       "displacement_mechanism": "specific mechanism",
       "fix_type": "T1_architecture|T2_authority|T3_volume|none",
       "fix_rationale": "why this specific fix for ChatGPT's training data pattern"
     },
     "gemini": {
-      "dit_turn": null_or_number,
+      "dit_turn": null,
       "t4_winner": "competitor name or brand name or null",
       "displacement_mechanism": "specific mechanism",
       "fix_type": "T1_architecture|T2_authority|T3_volume|none",
       "fix_rationale": "why this specific fix for Gemini's Educational Drift Arc pattern"
     },
     "perplexity": {
-      "dit_turn": null_or_number,
+      "dit_turn": null,
       "t4_winner": "competitor name or brand name or null",
       "displacement_mechanism": "specific mechanism",
       "fix_type": "T1_architecture|T2_authority|T3_volume|none",
@@ -690,7 +627,7 @@ Return ONLY valid JSON:
     {
       "priority": 1,
       "citation_tier": "T1|T2|T3",
-      "dependency": null_or_"Requires completion of intervention N",
+      "dependency": null,
       "action": "specific named action — what content, where, for which platform",
       "target_type": "source type",
       "target_publications": ["specific named publications, not generic categories"],
@@ -754,15 +691,10 @@ PROMPT;
     {
         $sourceTypes = $annotation['source_types'] ?? [];
         $dominant    = $annotation['dominant_type'] ?? '';
-
-        // Clinical science displacement = evaluative (criteria-based)
-        if (in_array($dominant, ['clinical_science'], true)) return 'evaluative';
-        // Community forum = comparative (peer comparison)
-        if (in_array($dominant, ['community_forum'], true)) return 'comparative';
-        // If multiple types without brand, it's multi-axis
+        if (in_array($dominant, ['clinical_science'], true))  return 'evaluative';
+        if (in_array($dominant, ['community_forum'], true))   return 'comparative';
         $nonBrandTypes = array_filter($sourceTypes, fn($s) => !($s['brand_cited_here'] ?? true));
         if (count($nonBrandTypes) >= 2) return 'multi_axis';
-
         return 'comparative';
     }
 
