@@ -20,8 +20,6 @@ use Illuminate\Database\Capsule\Manager as DB;
 class MeridianAuthController
 {
     // ── POST /api/meridian/auth/register ─────────────────────────
-    // Creates a new agency and its first admin user.
-    // Called during agency onboarding flow.
     public function register(): void
     {
         $body = request_body();
@@ -48,7 +46,6 @@ class MeridianAuthController
             return;
         }
 
-        // Check email not already in use
         $existing = DB::table('meridian_agency_users')
             ->where('email', $email)
             ->whereNull('deleted_at')
@@ -63,10 +60,8 @@ class MeridianAuthController
         try {
             DB::beginTransaction();
 
-            // Generate unique slug from agency name
             $slug = $this->generateSlug($agencyName);
 
-            // Create agency
             $agencyId = DB::table('meridian_agencies')->insertGetId([
                 'deployment_id'  => 1,
                 'name'           => $agencyName,
@@ -84,7 +79,6 @@ class MeridianAuthController
                 'updated_at'     => now(),
             ]);
 
-            // Create white-label config with defaults
             DB::table('meridian_white_label_configs')->insert([
                 'agency_id'           => $agencyId,
                 'agency_display_name' => $agencyName,
@@ -93,7 +87,6 @@ class MeridianAuthController
                 'updated_at'          => now(),
             ]);
 
-            // Create first admin user
             $passwordHash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
 
             $userId = DB::table('meridian_agency_users')->insertGetId([
@@ -108,7 +101,6 @@ class MeridianAuthController
                 'updated_at'    => now(),
             ]);
 
-            // Log action
             DB::table('meridian_audit_log')->insert([
                 'agency_id'   => $agencyId,
                 'user_id'     => $userId,
@@ -122,9 +114,7 @@ class MeridianAuthController
 
             DB::commit();
 
-            // Create session
-            $token = MeridianAuth::createSession($userId, $agencyId);
-
+            $token  = MeridianAuth::createSession($userId, $agencyId);
             $user   = DB::table('meridian_agency_users')->find($userId);
             $agency = DB::table('meridian_agencies')->find($agencyId);
 
@@ -162,7 +152,6 @@ class MeridianAuthController
                 ->whereNull('deleted_at')
                 ->first();
 
-            // Same error for wrong email or wrong password — prevents enumeration
             if (!$user || empty($user->password_hash) ||
                 !password_verify($password, $user->password_hash)) {
                 http_response_code(401);
@@ -181,7 +170,6 @@ class MeridianAuthController
                 return;
             }
 
-            // Update last login
             DB::table('meridian_agency_users')
                 ->where('id', $user->id)
                 ->update(['last_login_at' => now(), 'updated_at' => now()]);
@@ -220,12 +208,10 @@ class MeridianAuthController
     {
         $auth = MeridianAuth::require();
 
-        // Get white-label config
-        $wl = DB::table('meridian_white_label_configs')
+        $wl   = DB::table('meridian_white_label_configs')
             ->where('agency_id', $auth->agency_id)
             ->first();
 
-        // Get plan limits
         $plan = DB::table('meridian_pricing_plans')
             ->where('plan_type', $auth->agency->plan_type)
             ->first();
@@ -297,7 +283,13 @@ class MeridianAuthController
                     ]);
 
                 $firstName = $user->first_name ?: explode('@', $email)[0];
-                $resetUrl  = 'https://meridian.aivoedge.net/reset.html#reset=' . $token;
+
+                // FIX: Use FRONTEND_URL env var so the reset link always points
+                // to the correct domain. Falls back to app.aivomeridian.com.
+                // Format: ?token=xxx&mode=reset (query string, not hash fragment)
+                // so the frontend can read it via URLSearchParams on page load.
+                $frontendUrl = rtrim(env('FRONTEND_URL', 'https://app.aivomeridian.com'), '/');
+                $resetUrl    = $frontendUrl . '?token=' . $token . '&mode=reset';
 
                 $this->sendResetEmail($email, $firstName, $resetUrl);
             }
@@ -313,9 +305,12 @@ class MeridianAuthController
     // ── POST /api/meridian/auth/reset ────────────────────────────
     public function reset(): void
     {
-        $body        = request_body();
-        $token       = trim($body['token']        ?? '');
-        $newPassword = trim($body['new_password'] ?? '');
+        $body  = request_body();
+        $token = trim($body['token'] ?? '');
+
+        // FIX: Accept both 'password' (frontend sends this) and 'new_password'
+        // (legacy field name) to avoid silent field mismatch failures.
+        $newPassword = trim($body['password'] ?? $body['new_password'] ?? '');
 
         if (!$token) {
             http_response_code(400);
@@ -355,14 +350,13 @@ class MeridianAuthController
                     'updated_at'    => now(),
                 ]);
 
-            $agency = DB::table('meridian_agencies')->find($user->agency_id);
-            $token  = MeridianAuth::createSession((int)$user->id, (int)$user->agency_id);
-
+            $agency      = DB::table('meridian_agencies')->find($user->agency_id);
+            $sessionToken = MeridianAuth::createSession((int)$user->id, (int)$user->agency_id);
             $updatedUser = DB::table('meridian_agency_users')->find($user->id);
 
             json_response([
                 'status' => 'ok',
-                'token'  => $token,
+                'token'  => $sessionToken,
                 'user'   => MeridianAuth::safeUser($updatedUser, $agency),
             ]);
 
