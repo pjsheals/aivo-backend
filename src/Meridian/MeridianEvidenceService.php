@@ -20,15 +20,24 @@ use Illuminate\Database\Capsule\Manager as DB;
 class MeridianEvidenceService
 {
     private const AUTHORITY_SCORES = [
+        // Tier 1 — Maximum authority
         'peer_reviewed'   => 4,
         'regulatory'      => 4,
         'clinical'        => 4,
+        // Tier 2 — High authority
         'expert'          => 3,
         'third_party'     => 3,
+        'analyst_report'  => 3,
+        'industry_award'  => 3,
+        // Tier 3 — Medium authority
         'press'           => 2,
+        'review_platform' => 2,
+        'case_study'      => 2,
         'video'           => 2,
+        // Tier 4 — Supporting evidence
         'consumer_review' => 1,
         'corporate'       => 1,
+        'social_proof'    => 1,
         'self_published'  => 1,
     ];
 
