@@ -348,7 +348,7 @@ class MeridianFilterClassifier
     {
         if ($ditTurn === null) return 'T2';
         if ($ditTurn <= 1) return 'T0'; // Very early = entity recognition failure
-        if ($platform === 'gemini') return 'T1'; // Gemini = clinical evidence binary
+        if ($platform === 'gemini') return 'T1'; // Gemini = core evidence / authority binary
         if ($platform === 'perplexity') return 'T3'; // Perplexity = recency/retrieval
         return 'T2'; // ChatGPT default = multi-axis lifestyle fit
     }
@@ -698,7 +698,7 @@ You are the AIVO Evidentia Filter Classifier. Your job is to read a probe transc
 **T0 — Entity Recognition Failure**
 The model does not recognise the brand as a valid entity. Failure mode: No Wikipedia/Wikidata anchor.
 
-**T1 — Clinical Evidence Binary**
+**T1 — Core Evidence & Authority**
 The model evaluates whether the brand has peer-reviewed clinical backing for its active ingredients. Failure mode: Competitor has clinical citations; brand does not. Primary risk: Gemini.
 
 **T2 — Multi-Axis Lifestyle Fit**
@@ -731,10 +731,10 @@ Evidence priority: {$fp['evidence_priority']}
 ## DISPLACEMENT CRITERIA
 The displacement_criteria field is critical. It must express — in one precise sentence — the specific question or criteria the model applied at the displacement turn that the brand failed to answer. This is not a description of the mechanism. It is the exact question that, if the brand had evidence to answer it, would have kept it in the conversation.
 
-Examples:
-- "Which anti-ageing moisturiser has peer-reviewed clinical proof of visible wrinkle reduction within 8 weeks?"
-- "Which product has dermatologist-endorsed retinol formulation with documented efficacy for women over 50?"
-- "Which brand has the most recent independently verified evidence of its core skincare claim?"
+Examples (these are generic — always derive the actual question from the transcript):
+- "Which platform has independently verified evidence of measurable results for this specific use case?"
+- "Which brand has the most recent third-party validated evidence of its core capability?"
+- "Which provider has documented proof that it delivers the specific outcome the user needs?"
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON. No preamble, no markdown.
@@ -749,12 +749,12 @@ Return ONLY valid JSON. No preamble, no markdown.
   "evidence_gaps": [
     {
       "filter": "T1",
-      "field": "clinical_backing",
+      "field": "capability_evidence",
       "gap": "Specific description of what is missing.",
       "probe_type_relevance": "decision_stage"
     }
   ],
-  "brand_story_frame": "clinical_authority",
+  "brand_story_frame": "market_authority",
   "reasoning_chain": [
     { "step": 1, "question": "What category does the model place this brand in?", "signal": "What the transcript shows." },
     { "step": 2, "question": "What optimisation criterion did the model apply?", "signal": "What the transcript shows." },
@@ -818,7 +818,7 @@ MSG;
     {
         $fingerprints = [
             'chatgpt'    => ['name' => 'probabilistic_decision_boundary',  'primary_risk' => 'T2 multi-axis, competitive',    'evidence_priority' => 'Comparative differentiation, tipping evidence'],
-            'gemini'     => ['name' => 'deterministic_educational_drift',   'primary_risk' => 'T1 clinical, T4 technology',    'evidence_priority' => 'Peer-reviewed, dense citations, academic vocabulary'],
+            'gemini'     => ['name' => 'deterministic_educational_drift',   'primary_risk' => 'T1 authority, T4 technology',   'evidence_priority' => 'Peer-reviewed or expert-validated, dense citations, authoritative vocabulary'],
             'perplexity' => ['name' => 'live_rag_retrieval_recovery',       'primary_risk' => 'T7 availability, T6 context',   'evidence_priority' => 'Current dated, live URLs, commerce hooks'],
         ];
 
@@ -867,7 +867,7 @@ MSG;
     private function buildBriefText(string $filter, string $gapDesc, string $platform): string
     {
         $labels = [
-            'T0' => 'Entity Recognition',        'T1' => 'Clinical Evidence Binary',
+            'T0' => 'Entity Recognition',        'T1' => 'Core Evidence & Authority',
             'T2' => 'Multi-Axis Lifestyle Fit',   'T3' => 'Immediacy & Recency',
             'T4' => 'Technology Era Alignment',   'T5' => 'Price-Value Justification',
             'T6' => 'Context Window Fit',          'T7' => 'Availability & Accessibility',
@@ -875,14 +875,14 @@ MSG;
         ];
         $requirements = [
             'T0' => "(1) Brand Wikipedia page URL or Wikidata QID.\n(2) Canonical brand name.\n(3) Category and subcategory.",
-            'T1' => "(1) Named active ingredients by INCI or clinical name.\n(2) Peer-reviewed study, dermatologist citation, or regulatory approval per ingredient — with URL or DOI.\n(3) Positioning type: clinical, botanical, heritage, or lifestyle.",
+            'T1' => "(1) Named core capability or methodology with documented evidence.\n(2) Third-party study, expert citation, or independent validation — with URL or DOI.\n(3) Positioning type: established authority, proven methodology, or market leadership.",
             'T2' => "(1) Sustainability credentials with third-party certification URL.\n(2) Ethics and values positioning with evidence.\n(3) Accessibility context — price positioning and where sold.",
             'T3' => "(1) Dated evidence from the last 12 months — press, launches, clinical updates.\n(2) Live, crawlable URLs only.\n(3) Commerce hooks — where to buy, current availability.",
             'T4' => "(1) Named formulation technology with launch date.\n(2) Evidence the technology is current — patents, publications, independent coverage.\n(3) Comparison framing versus the competitor technology.",
             'T5' => "(1) Price justification evidence — clinical outcomes, ingredient cost, manufacturing.\n(2) Third-party validation — awards, press, expert endorsement.\n(3) Comparative value framing versus category benchmark.",
-            'T6' => "(1) Named use-case or occasion the brand suits best.\n(2) Skin type or concern specificity with evidence.\n(3) Expert or clinical recommendation for this context.",
+            'T6' => "(1) Named use-case or context where the brand delivers best.\n(2) Audience or need specificity with supporting evidence.\n(3) Expert or independent recommendation for this specific context.",
             'T7' => "(1) Retail channel list — online and in-store, with URLs.\n(2) Regional availability.\n(3) Budget positioning versus accessible alternatives.",
-            'T8' => "(1) Dermatologist or clinician endorsement with name and credential.\n(2) Regulatory approval — FDA, EMA, MHRA, or equivalent.\n(3) Safety or allergy testing certification with URL.",
+            'T8' => "(1) Qualified expert endorsement with name and credential.\n(2) Regulatory approval or industry certification — with URL.\n(3) Independent safety or compliance testing certification with URL.",
         ];
 
         $label = $labels[$filter] ?? $filter;
