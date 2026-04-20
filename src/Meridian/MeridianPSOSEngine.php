@@ -14,6 +14,10 @@ use Illuminate\Database\Capsule\Manager as DB;
  * Scores 5 dimensions: Breadth, Depth, Resilience, Sentiment, Decay.
  * Produces Fragile (<40), Moderate (40-69), Strong (>=70) banding.
  * Labelled as PSOS Baseline — single run establishes baseline, decay requires second run.
+ *
+ * IMPORTANT: All prompt templates must be category-agnostic.
+ * No skincare, healthcare, or category-specific language anywhere in this file.
+ * The {category} placeholder is substituted at runtime from the brand record.
  */
 class MeridianPSOSEngine
 {
@@ -28,12 +32,14 @@ class MeridianPSOSEngine
         'consideration_compare'  => "How does {brand} compare to its competitors in {category}?",
         'consideration_worth'    => "Is {brand} worth the money for {category}?",
         'consideration_review'   => "What do experts say about {brand} {product}?",
-        'criteria_clinical'    => "What is the best {category} with clinically proven ingredients?",
+        // Fixed: removed "clinically proven ingredients" — skincare-specific, not category-agnostic
+        'criteria_clinical'    => "What is the best {category} with independently verified results?",
         'criteria_value'       => "What is the best value {category} that actually works?",
         'criteria_specific'    => "I need a {category} for {use_case}. What would you recommend?",
         'competitive_vs'       => "Which is better: {brand} or {competitor_placeholder}?",
         'competitive_alt'      => "What are the best alternatives to {brand} in {category}?",
-        'competitive_category' => "What do most dermatologists recommend for {category}?",
+        // Fixed: removed "dermatologists" — skincare-specific
+        'competitive_category' => "What do most experts recommend for {category}?",
         'purchase_buy'         => "Where can I buy the best {category}?",
         'purchase_recommend'   => "What {category} would you personally recommend?",
         'purchase_decision'    => "I'm about to buy a {category}. What should I get?",
@@ -113,8 +119,6 @@ class MeridianPSOSEngine
         ]);
 
         try {
-            // PSOS worker never creates a meridian_brand_audit_results record via the
-            // normal BJP path — must INSERT if none exists, otherwise UPDATE.
             $existing = DB::table('meridian_brand_audit_results')
                 ->where('audit_id', $auditId)
                 ->first(['id']);
@@ -181,19 +185,40 @@ class MeridianPSOSEngine
         return $category . 's';
     }
 
+    /**
+     * Infer a generic use case from the brand category.
+     * Must be category-agnostic — no hardcoded skincare/beauty/healthcare terms.
+     * Falls back to "everyday use" for any unrecognised category.
+     */
     private function inferUseCase(string $category): string
     {
+        // Generic use-case mapping — add new categories here as needed.
+        // All entries must be category-agnostic in framing.
         $useCaseMap = [
-            'moisturiser' => 'anti-ageing and hydration',
-            'serum'       => 'brightening and anti-ageing',
-            'cleanser'    => 'sensitive skin',
-            'foundation'  => 'everyday wear and medium coverage',
-            'sunscreen'   => 'daily SPF protection',
-            'shampoo'     => 'damaged and colour-treated hair',
+            // Software / SaaS
+            'software'        => 'professional and business use',
+            'platform'        => 'professional and business use',
+            'tool'            => 'professional and business use',
+            'analytics'       => 'tracking and reporting',
+            'measurement'     => 'tracking and reporting',
+            // Consumer tech
+            'headphones'      => 'everyday listening and commuting',
+            'laptop'          => 'work and productivity',
+            'phone'           => 'everyday communication and productivity',
+            // Food & drink
+            'coffee'          => 'daily morning use',
+            'supplement'      => 'daily health and wellness',
+            // Travel
+            'luggage'         => 'frequent travel',
+            'hotel'           => 'business and leisure travel',
         ];
+
+        $lower = strtolower($category);
         foreach ($useCaseMap as $word => $useCase) {
-            if (str_contains(strtolower($category), $word)) return $useCase;
+            if (str_contains($lower, $word)) return $useCase;
         }
+
+        // Generic fallback — always category-agnostic
         return 'everyday use';
     }
 
