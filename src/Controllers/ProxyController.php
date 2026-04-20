@@ -39,7 +39,7 @@ class ProxyController
             ],
             'gemini' => [
                 'url'    => 'https://generativelanguage.googleapis.com/v1beta/models',
-                'model'  => 'gemini-2.0-flash',
+                'model'  => 'gemini-2.5-flash',
                 'format' => 'gemini',
                 'key'    => env('GEMINI_API_KEY'),
             ],
