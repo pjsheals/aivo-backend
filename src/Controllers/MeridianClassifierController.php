@@ -61,31 +61,32 @@ class MeridianClassifierController
 
     /**
      * POST /api/meridian/classify/all
-     * Body: { "audit_id": 123 }
+     * Body: { "audit_id": 123, "brand_id": 9 }
      *
-     * Classifies every platform × probe_mode combination that has a completed
-     * (or any status) probe run for this audit. A Full Suite audit produces
-     * anchored + generic modes per platform, so this generates up to 6
-     * classifications rather than just 3 — giving a complete picture of
-     * where the brand is displaced differently across modes.
-     *
-     * Results are keyed as "{platform}_{mode}" e.g. "chatgpt_anchored".
+     * Classifies every platform × probe_mode combination that has a probe run
+     * for this audit. If the requested audit is PSOS-only (no BJP probe runs),
+     * automatically falls back to the most recent audit for the same brand
+     * that DOES have BJP probe runs. This is transparent to the caller —
+     * the response includes a `classified_audit_id` field so the frontend
+     * knows which audit was actually used.
      */
     public function classifyAll(): void
     {
         $auth = MeridianAuth::require();
         $body = request_body();
 
-        $auditId = isset($body['audit_id']) ? (int)$body['audit_id'] : null;
+        $requestedAuditId = isset($body['audit_id']) ? (int)$body['audit_id'] : null;
+        $brandId          = isset($body['brand_id']) ? (int)$body['brand_id'] : null;
 
-        if (!$auditId) {
+        if (!$requestedAuditId) {
             http_response_code(400);
             json_response(['error' => 'audit_id is required.']);
             return;
         }
 
+        // Verify the requested audit exists and belongs to this agency.
         $audit = DB::table('meridian_audits')
-            ->where('id', $auditId)
+            ->where('id', $requestedAuditId)
             ->where('agency_id', $auth->agency_id)
             ->first();
 
@@ -95,17 +96,37 @@ class MeridianClassifierController
             return;
         }
 
-        // Get all distinct platform × probe_mode combinations for this audit.
-        // Prefer completed runs but fall back to any status so the classifier's
-        // journey_runs fallback path can handle incomplete probe data.
+        // Determine which audit to actually classify against.
+        // Prefer the requested one; if it has no BJP probe runs (e.g. it's a
+        // PSOS-only audit), fall back to the most recent audit for the same
+        // brand that has BJP probe runs.
+        $effectiveAuditId = $this->resolveAuditWithProbeRuns(
+            $requestedAuditId,
+            (int)$audit->brand_id,
+            (int)$auth->agency_id
+        );
+
+        if ($effectiveAuditId === null) {
+            json_response([
+                'success' => false,
+                'error'   => 'No Buying Journey Probe runs found for this brand. Run a Full Suite or Directed BJP audit before running M1 classification.',
+                'data'    => [],
+                'errors'  => [],
+            ]);
+            return;
+        }
+
+        // Get all distinct platform × probe_mode combinations for the effective audit.
         $probeRuns = DB::table('meridian_probe_runs')
-            ->where('audit_id', $auditId)
+            ->where('audit_id', $effectiveAuditId)
             ->whereIn('platform', ['chatgpt', 'gemini', 'perplexity'])
             ->select('platform', 'probe_mode')
             ->distinct()
             ->get();
 
         if ($probeRuns->isEmpty()) {
+            // Shouldn't happen given resolveAuditWithProbeRuns returned a non-null ID,
+            // but guard defensively.
             json_response([
                 'success' => false,
                 'error'   => 'No probe runs found for this audit.',
@@ -125,21 +146,25 @@ class MeridianClassifierController
             $key       = $platform . '_' . $probeMode;
 
             try {
-                $results[$key] = $classifier->classifyByMode($auditId, $platform, $probeMode);
+                $results[$key] = $classifier->classifyByMode($effectiveAuditId, $platform, $probeMode);
             } catch (\Throwable $e) {
                 $errors[$key] = $e->getMessage();
                 log_error('[MeridianClassifier] classifyAll error', [
-                    'platform'  => $platform,
-                    'probe_mode'=> $probeMode,
-                    'error'     => $e->getMessage(),
+                    'audit_id'   => $effectiveAuditId,
+                    'platform'   => $platform,
+                    'probe_mode' => $probeMode,
+                    'error'      => $e->getMessage(),
                 ]);
             }
         }
 
         json_response([
-            'success' => count($results) > 0,
-            'data'    => $results,
-            'errors'  => $errors,
+            'success'               => count($results) > 0,
+            'data'                  => $results,
+            'errors'                => $errors,
+            'requested_audit_id'    => $requestedAuditId,
+            'classified_audit_id'   => $effectiveAuditId,
+            'fallback_used'         => $effectiveAuditId !== $requestedAuditId,
         ]);
     }
 
@@ -168,8 +193,16 @@ class MeridianClassifierController
             return;
         }
 
+        // Resolve to the audit that actually has classifications — same fallback
+        // pattern as classifyAll so the UI shows the same data.
+        $effectiveAuditId = $this->resolveAuditWithProbeRuns(
+            $auditId,
+            (int)$audit->brand_id,
+            (int)$auth->agency_id
+        ) ?? $auditId;
+
         $rows = DB::table('meridian_filter_classifications')
-            ->where('audit_id', $auditId)
+            ->where('audit_id', $effectiveAuditId)
             ->orderByDesc('created_at')
             ->get();
 
@@ -193,6 +226,47 @@ class MeridianClassifierController
             ];
         })->toArray();
 
-        json_response(['success' => true, 'data' => $out]);
+        json_response([
+            'success'               => true,
+            'data'                  => $out,
+            'requested_audit_id'    => $auditId,
+            'classified_audit_id'   => $effectiveAuditId,
+            'fallback_used'         => $effectiveAuditId !== $auditId,
+        ]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Return the audit ID that should actually be classified. If the requested
+     * audit has BJP probe runs (chatgpt/gemini/perplexity), return it unchanged.
+     * Otherwise find the most recent audit for the same brand/agency that has
+     * BJP probe runs. Returns null if no audit for this brand has BJP runs.
+     */
+    private function resolveAuditWithProbeRuns(int $requestedAuditId, int $brandId, int $agencyId): ?int
+    {
+        $hasRuns = DB::table('meridian_probe_runs')
+            ->where('audit_id', $requestedAuditId)
+            ->whereIn('platform', ['chatgpt', 'gemini', 'perplexity'])
+            ->exists();
+
+        if ($hasRuns) {
+            return $requestedAuditId;
+        }
+
+        // Find the most recent audit for this brand (scoped to this agency)
+        // that has at least one BJP probe run.
+        $fallback = DB::table('meridian_audits as a')
+            ->join('meridian_probe_runs as pr', 'pr.audit_id', '=', 'a.id')
+            ->where('a.brand_id', $brandId)
+            ->where('a.agency_id', $agencyId)
+            ->whereIn('pr.platform', ['chatgpt', 'gemini', 'perplexity'])
+            ->orderByDesc('a.created_at')
+            ->select('a.id')
+            ->first();
+
+        return $fallback ? (int)$fallback->id : null;
     }
 }
