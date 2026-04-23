@@ -90,10 +90,22 @@ class MeridianEvidenceController
             return;
         }
 
-        $service = new MeridianEvidenceService();
-        $grouped = $service->getByBrand($brandId, $auditId);
+        // Apply the same fallback as classifyAll — if the requested audit has no
+        // classifications, use the most recent audit for this brand that does.
+        $effectiveAuditId = $auditId
+            ? $this->resolveAuditWithClassifications($auditId, $brandId, (int)$auth->agency_id)
+            : null;
 
-        json_response(['success' => true, 'data' => $grouped]);
+        $service = new MeridianEvidenceService();
+        $grouped = $service->getByBrand($brandId, $effectiveAuditId ?? $auditId);
+
+        json_response([
+            'success'             => true,
+            'data'                => $grouped,
+            'requested_audit_id'  => $auditId,
+            'classified_audit_id' => $effectiveAuditId,
+            'fallback_used'       => $effectiveAuditId !== null && $effectiveAuditId !== $auditId,
+        ]);
     }
 
     /**
@@ -125,10 +137,25 @@ class MeridianEvidenceController
             return;
         }
 
-        $service = new MeridianEvidenceService();
-        $status  = $service->getGapCompletionStatus($brandId, $auditId);
+        // Apply the same fallback as classifyAll — if the requested audit has no
+        // classifications (e.g. it's a PSOS-only audit with no BJP probe runs),
+        // fall back to the most recent audit for this brand that does.
+        $effectiveAuditId = $this->resolveAuditWithClassifications(
+            $auditId,
+            $brandId,
+            (int)$auth->agency_id
+        ) ?? $auditId;
 
-        json_response(['success' => true, 'data' => $status]);
+        $service = new MeridianEvidenceService();
+        $status  = $service->getGapCompletionStatus($brandId, $effectiveAuditId);
+
+        json_response([
+            'success'             => true,
+            'data'                => $status,
+            'requested_audit_id'  => $auditId,
+            'classified_audit_id' => $effectiveAuditId,
+            'fallback_used'       => $effectiveAuditId !== $auditId,
+        ]);
     }
 
     /**
@@ -204,5 +231,42 @@ class MeridianEvidenceController
         }
 
         json_response(['success' => true]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Return the audit ID that has filter classifications for this brand.
+     * If the requested audit has classifications, return it unchanged.
+     * Otherwise find the most recent audit for the same brand/agency that has
+     * classifications. Returns null if no audit for this brand has any.
+     *
+     * Mirrors the fallback logic in MeridianClassifierController::classifyAll
+     * so the Evidence Portal and M1 classifier stay in sync.
+     */
+    private function resolveAuditWithClassifications(int $requestedAuditId, int $brandId, int $agencyId): ?int
+    {
+        $hasClassifications = DB::table('meridian_filter_classifications')
+            ->where('audit_id', $requestedAuditId)
+            ->where('brand_id', $brandId)
+            ->exists();
+
+        if ($hasClassifications) {
+            return $requestedAuditId;
+        }
+
+        // Find the most recent audit for this brand (scoped to this agency)
+        // that has at least one filter classification.
+        $fallback = DB::table('meridian_audits as a')
+            ->join('meridian_filter_classifications as fc', 'fc.audit_id', '=', 'a.id')
+            ->where('a.brand_id', $brandId)
+            ->where('a.agency_id', $agencyId)
+            ->orderByDesc('a.created_at')
+            ->select('a.id')
+            ->first();
+
+        return $fallback ? (int)$fallback->id : null;
     }
 }
