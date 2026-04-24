@@ -105,11 +105,36 @@ class MeridianEvidenceService
             'updated_at'          => now(),
         ]);
 
+        // Run URL/DOI reachability check inline so the row lands in a final
+        // state (verified | failed | invalid) instead of sitting as 'pending'
+        // forever. Worst-case adds ~10s per submit if the URL times out.
+        // Wrapped in try/catch so a verify failure NEVER blocks submission —
+        // the row still exists, user can re-verify or edit later.
+        $verifyResult = [
+            'submission_id'       => $id,
+            'verified'            => false,
+            'verification_status' => 'pending',
+            'url_resolves'        => null,
+            'doi_resolves'        => null,
+            'notes'               => [],
+        ];
+
+        try {
+            $verifyResult = $this->verify($id);
+        } catch (\Throwable $e) {
+            error_log('[MeridianEvidence] post-submit verify failed for ' . $id . ': ' . $e->getMessage());
+            $verifyResult['notes'] = ['Verification could not be performed — will retry on next action.'];
+        }
+
         return [
             'submission_id'       => $id,
             'authority_score'     => $authorityScore,
             'authority_tier'      => $this->getTierLabel($authorityScore),
-            'verification_status' => 'pending',
+            'verification_status' => $verifyResult['verification_status'] ?? 'pending',
+            'verified'            => $verifyResult['verified']            ?? false,
+            'url_resolves'        => $verifyResult['url_resolves']        ?? null,
+            'doi_resolves'        => $verifyResult['doi_resolves']        ?? null,
+            'verification_notes'  => $verifyResult['notes']               ?? [],
         ];
     }
 
@@ -170,6 +195,65 @@ class MeridianEvidenceService
             'notes'               => $notes,
             'authority_score'     => $submission->authority_score,
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Update an existing submission
+    //
+    // Allows editing URL, type, title, DOI, free_text, or date_published on an
+    // existing submission. Re-runs verification after the update since URL or
+    // DOI may have changed. Scoped to agency for defence in depth.
+    // -------------------------------------------------------------------------
+
+    public function update(string $submissionId, array $data, int $agencyId): array
+    {
+        $submission = DB::table('meridian_evidence_submissions')
+            ->where('id', $submissionId)
+            ->where('agency_id', $agencyId)
+            ->first();
+
+        if (!$submission) {
+            throw new \RuntimeException('Submission not found or access denied.');
+        }
+
+        // Compute the post-update state for content validation — use the new
+        // value if provided, otherwise fall back to the existing value.
+        $newUrl      = array_key_exists('source_url', $data) ? $data['source_url'] : $submission->source_url;
+        $newDoi      = array_key_exists('doi',        $data) ? $data['doi']        : $submission->doi;
+        $newFreeText = array_key_exists('free_text',  $data) ? $data['free_text']  : $submission->free_text;
+
+        $hasContent = !empty($newUrl) || !empty($newDoi) || !empty($newFreeText);
+        if (!$hasContent) {
+            throw new \InvalidArgumentException('At least one of source_url, doi, or free_text is required.');
+        }
+
+        $updates = ['updated_at' => now()];
+
+        if (array_key_exists('source_url',     $data)) $updates['source_url']     = $data['source_url']     ?: null;
+        if (array_key_exists('source_type',    $data)) $updates['source_type']    = $data['source_type']    ?: null;
+        if (array_key_exists('source_title',   $data)) $updates['source_title']   = $data['source_title']   ?: null;
+        if (array_key_exists('doi',            $data)) $updates['doi']            = $data['doi']            ?: null;
+        if (array_key_exists('free_text',      $data)) $updates['free_text']      = $data['free_text']      ?: null;
+        if (array_key_exists('date_published', $data)) $updates['date_published'] = $data['date_published'] ?: null;
+
+        // Recompute authority_score if source_type changed, since the tier
+        // mapping could have shifted.
+        if (array_key_exists('source_type', $data)) {
+            $updates['authority_score'] = $this->computeAuthorityScore($data['source_type'] ?? null);
+        }
+
+        DB::table('meridian_evidence_submissions')
+            ->where('id', $submissionId)
+            ->update($updates);
+
+        // Re-run verify since URL/DOI may have changed. If this throws we let
+        // it propagate — unlike submit(), the row already existed in a valid
+        // state before the update, so a verify failure on update is genuine.
+        $verifyResult = $this->verify($submissionId);
+
+        return array_merge($verifyResult, [
+            'submission_id' => $submissionId,
+        ]);
     }
 
     // -------------------------------------------------------------------------
