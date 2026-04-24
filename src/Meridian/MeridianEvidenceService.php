@@ -11,29 +11,52 @@ use Illuminate\Database\Capsule\Manager as DB;
  *
  * Handles evidence submission, verification, and authority scoring.
  *
- * Source authority hierarchy:
- *   Tier 1 (score 4): peer_reviewed, regulatory, clinical
- *   Tier 2 (score 3): independent dermatologist/expert, named lab study, third-party audit
- *   Tier 3 (score 2): press (Guardian, FT, Vogue, industry titles), review platforms
- *   Tier 4 (score 1): corporate, self_published
+ * Source authority hierarchy (industry-neutral, function-first):
+ *   Score 5 — Canonical LLM entity anchor (Wikipedia/Wikidata). Displayed as
+ *             Tier 1 in the UI but weights above other Tier 1 sources in atom
+ *             synthesis because Wikipedia is the training corpus itself, not
+ *             merely one authoritative document within it.
+ *   Score 4 — Formal, independently-validated evidence with published
+ *             methodology — peer-reviewed publications, regulatory approvals,
+ *             formal studies/trials (clinical, SOC 2, crash test, etc.),
+ *             DOI-registered methodology publications, standards body
+ *             publications.
+ *   Score 3 — Named, independent third parties making specific attributed
+ *             claims — expert endorsements, third-party audits, analyst
+ *             reports, industry awards, government/public-sector sources.
+ *   Score 2 — Attributed, published, but not independently vetted — press
+ *             coverage, review platforms, case studies, expert videos,
+ *             market landscape reports, open-source infrastructure
+ *             repositories.
+ *   Score 1 — Self-published, community-sourced, or unattributed — customer
+ *             reviews, brand-owned content, community signals, self-published
+ *             research/preprints.
  */
 class MeridianEvidenceService
 {
     private const AUTHORITY_SCORES = [
+        // Tier 1 — Canonical entity anchor (displayed as Tier 1 in UI)
+        'wikipedia'       => 5,
         // Tier 1 — Maximum authority
         'peer_reviewed'   => 4,
         'regulatory'      => 4,
         'clinical'        => 4,
+        'formal_study'    => 4,
+        'doi_registered'  => 4,
+        'standards_body'  => 4,
         // Tier 2 — High authority
         'expert'          => 3,
         'third_party'     => 3,
         'analyst_report'  => 3,
         'industry_award'  => 3,
+        'government'      => 3,
         // Tier 3 — Medium authority
         'press'           => 2,
         'review_platform' => 2,
         'case_study'      => 2,
         'video'           => 2,
+        'market_landscape'=> 2,
+        'open_source_repo'=> 2,
         // Tier 4 — Supporting evidence
         'consumer_review' => 1,
         'corporate'       => 1,
@@ -509,6 +532,7 @@ class MeridianEvidenceService
     private function getTierLabel(?int $score): string
     {
         return match(true) {
+            $score >= 5 => 'Tier 1 — Maximum authority',
             $score >= 4 => 'Tier 1 — Maximum authority',
             $score >= 3 => 'Tier 2 — High authority',
             $score >= 2 => 'Tier 3 — Medium authority',
