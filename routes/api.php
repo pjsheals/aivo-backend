@@ -189,6 +189,7 @@ $routes = [
 
         // ── Meridian: Evidence Portal ──────────────────────────
         '/api/meridian/evidence/submit'        => [MeridianEvidenceController::class, 'submit'],
+        '/api/meridian/evidence/update'        => [MeridianEvidenceController::class, 'update'],
         '/api/meridian/evidence/verify'        => [MeridianEvidenceController::class, 'verify'],
         '/api/meridian/evidence/delete'        => [MeridianEvidenceController::class, 'delete'],
 
