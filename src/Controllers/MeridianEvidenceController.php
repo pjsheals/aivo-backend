@@ -233,6 +233,63 @@ class MeridianEvidenceController
         json_response(['success' => true]);
     }
 
+    /**
+     * POST /api/meridian/evidence/update
+     *
+     * Body: {
+     *   submission_id,
+     *   source_url?, source_type?, source_title?, doi?, free_text?, date_published?
+     * }
+     *
+     * Updates an existing submission and re-runs URL/DOI verification.
+     * Any field omitted is left unchanged. At least one of source_url, doi,
+     * or free_text must remain populated after the update.
+     */
+    public function update(): void
+    {
+        $auth = MeridianAuth::require();
+        $body = request_body();
+
+        $submissionId = $body['submission_id'] ?? null;
+
+        if (!$submissionId) {
+            http_response_code(400);
+            json_response(['error' => 'submission_id is required.']);
+            return;
+        }
+
+        // Confirm submission belongs to this agency (defence in depth — the
+        // service also checks, but we want a clean 403 not a 500 here).
+        $submission = DB::table('meridian_evidence_submissions')
+            ->where('id', $submissionId)
+            ->where('agency_id', $auth->agency_id)
+            ->first();
+
+        if (!$submission) {
+            http_response_code(403);
+            json_response(['error' => 'Submission not found or access denied.']);
+            return;
+        }
+
+        try {
+            $service = new MeridianEvidenceService();
+            $result  = $service->update($submissionId, $body, (int)$auth->agency_id);
+
+            json_response(['success' => true, 'data' => $result]);
+
+        } catch (\InvalidArgumentException $e) {
+            http_response_code(400);
+            json_response(['success' => false, 'error' => $e->getMessage()]);
+        } catch (\RuntimeException $e) {
+            http_response_code(404);
+            json_response(['success' => false, 'error' => $e->getMessage()]);
+        } catch (\Throwable $e) {
+            log_error('[MeridianEvidence] update error', ['error' => $e->getMessage()]);
+            http_response_code(500);
+            json_response(['success' => false, 'error' => 'Internal server error.']);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
