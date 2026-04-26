@@ -17,6 +17,10 @@ use Illuminate\Database\Capsule\Manager as DB;
  *
  * Each destination runs as an independent job with retry logic.
  * All jobs are tracked in meridian_publication_jobs.
+ *
+ * Pass 3a changes (2026-04-26):
+ * - queueAtom() now dedupes — won't create duplicate jobs for same atom/destination
+ * - getStatus() now returns job ID so frontend can drive processing
  */
 class MeridianPublicationPipeline
 {
@@ -45,7 +49,9 @@ class MeridianPublicationPipeline
     {
         $atom = DB::table('meridian_atoms')->where('id', $atomId)->first();
         if (!$atom) throw new \RuntimeException("Atom {$atomId} not found.");
-        if ($atom->status !== 'validated') throw new \RuntimeException("Atom must be validated before publishing. Current status: {$atom->status}");
+        if ($atom->status !== 'validated' && $atom->status !== 'published') {
+            throw new \RuntimeException("Atom must be validated before publishing. Current status: {$atom->status}");
+        }
 
         $brand = DB::table('meridian_brands')->find($atom->brand_id);
         if (!$brand) throw new \RuntimeException("Brand not found.");
@@ -53,17 +59,68 @@ class MeridianPublicationPipeline
         // Determine destinations
         $destinations = $this->resolveDestinations($brand, $options);
 
+        // ─── DEDUPE LOGIC (Pass 3a) ──────────────────────────────────────
+        // For each destination, check if a job already exists.
+        //   - completed/queued/running → leave alone, return existing ID
+        //   - failed/retrying          → reset to queued, return existing ID
+        //   - none                     → create new job
+        // ─────────────────────────────────────────────────────────────────
+
         $jobIds = [];
         foreach ($destinations['automated'] as $destination) {
-            $jobId = $this->createJob($atomId, (int)$atom->brand_id, (int)$atom->audit_id, (int)$atom->agency_id, $destination);
-            $jobIds[] = ['destination' => $destination, 'job_id' => $jobId];
+            $existing = DB::table('meridian_publication_jobs')
+                ->where('atom_id', $atomId)
+                ->where('destination', $destination)
+                ->orderBy('created_at', 'desc')
+                ->first();
+
+            if ($existing) {
+                // Reset failed/retrying jobs back to queued for retry
+                if (in_array($existing->status, ['failed', 'retrying'], true)) {
+                    DB::table('meridian_publication_jobs')
+                        ->where('id', $existing->id)
+                        ->update([
+                            'status'        => 'queued',
+                            'attempt_count' => 0,
+                            'error_message' => null,
+                            'next_retry_at' => null,
+                            'updated_at'    => now(),
+                        ]);
+                }
+                // Otherwise leave queued/running/completed jobs alone
+                $jobIds[] = ['destination' => $destination, 'job_id' => $existing->id];
+            } else {
+                // No existing job — create new
+                $jobId = $this->createJob(
+                    $atomId,
+                    (int)$atom->brand_id,
+                    (int)$atom->audit_id,
+                    (int)$atom->agency_id,
+                    $destination
+                );
+                $jobIds[] = ['destination' => $destination, 'job_id' => $jobId];
+            }
         }
 
-        // Generate manual submission packages
+        // Manual submission packages — same dedupe pattern
         $manualPackages = [];
         foreach ($destinations['manual'] as $destination) {
-            $package = $this->generateManualPackage($atom, $brand, $destination);
-            $manualPackages[] = $package;
+            $existing = DB::table('meridian_manual_submissions')
+                ->where('atom_id', $atomId)
+                ->where('destination', $destination)
+                ->orderBy('created_at', 'desc')
+                ->first();
+
+            if ($existing) {
+                $manualPackages[] = [
+                    'destination' => $destination,
+                    'package_id'  => $existing->id,
+                    'brief'       => $existing->brief,
+                ];
+            } else {
+                $package = $this->generateManualPackage($atom, $brand, $destination);
+                $manualPackages[] = $package;
+            }
         }
 
         return [
@@ -168,6 +225,46 @@ class MeridianPublicationPipeline
 
             return ['status' => $newStatus, 'error' => $e->getMessage()];
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Process all queued jobs for an atom (Pass 3a — used by /process-all endpoint)
+    // -------------------------------------------------------------------------
+
+    public function processAllForAtom(string $atomId): array
+    {
+        $jobs = DB::table('meridian_publication_jobs')
+            ->where('atom_id', $atomId)
+            ->whereIn('status', ['queued', 'retrying'])
+            ->get();
+
+        $results = [];
+        foreach ($jobs as $job) {
+            try {
+                $result = $this->processJob($job->id);
+                $results[] = [
+                    'job_id'      => $job->id,
+                    'destination' => $job->destination,
+                    'status'      => $result['status'],
+                    'result'      => $result['result'] ?? null,
+                    'error'       => $result['error']  ?? null,
+                ];
+            } catch (\Throwable $e) {
+                // Isolated error handling — one failure doesn't stop the others
+                $results[] = [
+                    'job_id'      => $job->id,
+                    'destination' => $job->destination,
+                    'status'      => 'failed',
+                    'error'       => $e->getMessage(),
+                ];
+            }
+        }
+
+        return [
+            'atom_id'    => $atomId,
+            'processed'  => count($results),
+            'results'    => $results,
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -895,6 +992,7 @@ class MeridianPublicationPipeline
         return [
             'atom_id'  => $atomId,
             'jobs'     => $jobs->map(fn($j) => [
+                'id'            => $j->id,
                 'destination'   => $j->destination,
                 'status'        => $j->status,
                 'result_url'    => $j->result_url,
@@ -904,6 +1002,7 @@ class MeridianPublicationPipeline
                 'completed_at'  => $j->completed_at,
             ])->toArray(),
             'manual'   => $manual->map(fn($m) => [
+                'id'          => $m->id,
                 'destination' => $m->destination,
                 'status'      => $m->status,
                 'brief'       => $m->brief,
