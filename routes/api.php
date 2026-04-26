@@ -200,8 +200,9 @@ $routes = [
         '/api/meridian/atoms/mark-published'   => [MeridianAtomController::class, 'markPublished'],
 
         // ── Meridian: Publication Pipeline ────────────────────
-        '/api/meridian/publish/queue'          => [MeridianPublicationController::class, 'queue'],
-        '/api/meridian/publish/process'        => [MeridianPublicationController::class, 'process'],
+        '/api/meridian/publish/queue'            => [MeridianPublicationController::class, 'queue'],
+        '/api/meridian/publish/process'          => [MeridianPublicationController::class, 'process'],
+        '/api/meridian/publish/process-all'      => [MeridianPublicationController::class, 'processAll'],
         '/api/meridian/publish/manual-submitted' => [MeridianPublicationController::class, 'markManualSubmitted'],
 
         // ── Meridian: Crawler Instructions ────────────────────
