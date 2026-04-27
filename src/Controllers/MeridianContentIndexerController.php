@@ -14,20 +14,17 @@ use Illuminate\Database\Capsule\Manager as DB;
  *
  * Endpoints:
  *   GET  /api/meridian/content-sources             — list sources for a brand
- *   POST /api/meridian/content-sources/create      — register a new source (sitemap, feed, etc.)
+ *   POST /api/meridian/content-sources/create      — register a new source
  *   POST /api/meridian/content-sources/crawl       — trigger background crawl worker
  *   POST /api/meridian/content-sources/delete      — soft-delete a source
- *   GET  /api/meridian/content-items               — list crawled items (by source or brand)
+ *   GET  /api/meridian/content-items               — list crawled items
  *   GET  /api/meridian/content-items/detail        — single item detail
  *
- * The crawl worker is dispatched via exec() to /app/workers/run_content_crawl.php
- * — same pattern as run_audit.php. Returns 202 Accepted immediately; client
- * polls the source row's status field to track progress.
+ * Note: meridian_brand_content_sources HAS deleted_at (soft-delete supported).
+ *       meridian_brand_content_items   does NOT (refreshed by crawl, not deleted).
  */
 class MeridianContentIndexerController
 {
-    // Source status state machine:
-    //   pending  → crawling → completed | failed
     private const STATUS_PENDING   = 'pending';
     private const STATUS_CRAWLING  = 'crawling';
     private const STATUS_COMPLETED = 'completed';
@@ -63,7 +60,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-sources/create ────────────────
-    // Body: { brand_id, source_url, source_type, crawl_cadence_days? }
     public function createSource(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -100,7 +96,6 @@ class MeridianContentIndexerController
 
         $this->fetchBrandOrAbort($brandId, $auth);
 
-        // Phase 1 only supports sitemap. Other types accepted into DB but worker will reject.
         if ($sourceType !== 'sitemap') {
             log_error('[ORBIT] Non-sitemap source_type registered (Phase 1 worker will reject)', [
                 'brand_id'    => $brandId,
@@ -135,8 +130,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-sources/crawl ─────────────────
-    // Body: { source_id }
-    // Fires background worker; returns 202 immediately.
     public function triggerCrawl(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -160,10 +153,8 @@ class MeridianContentIndexerController
             return;
         }
 
-        // Verify the brand belongs to this agency (or user is superadmin).
         $this->fetchBrandOrAbort((int)$source->brand_id, $auth);
 
-        // Guard against double-fire — if already crawling, return current state instead of re-firing.
         if ($source->status === self::STATUS_CRAWLING) {
             http_response_code(409);
             json_response([
@@ -173,7 +164,6 @@ class MeridianContentIndexerController
             return;
         }
 
-        // Mark as crawling BEFORE dispatching worker — prevents race on rapid double-click.
         DB::table('meridian_brand_content_sources')
             ->where('id', $sourceId)
             ->update([
@@ -182,7 +172,6 @@ class MeridianContentIndexerController
                 'updated_at' => now(),
             ]);
 
-        // ── Fire background worker ────────────────────────────────
         $workerScript = realpath(__DIR__ . '/../../workers/run_content_crawl.php');
         if ($workerScript && file_exists($workerScript)) {
             $cmd = PHP_BINARY . ' ' . escapeshellarg($workerScript)
@@ -190,7 +179,6 @@ class MeridianContentIndexerController
                 . ' > /dev/null 2>&1 &';
             exec($cmd);
         } else {
-            // Worker missing — revert status so user can see something is wrong.
             DB::table('meridian_brand_content_sources')
                 ->where('id', $sourceId)
                 ->update([
@@ -217,8 +205,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-sources/delete ────────────────
-    // Body: { source_id }
-    // Soft-delete only — sets deleted_at. Items are kept for audit but excluded from listings.
     public function deleteSource(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -255,7 +241,6 @@ class MeridianContentIndexerController
     }
 
     // ── GET /api/meridian/content-items?source_id=X or ?brand_id=Y
-    // Optional: &limit=50 (default 50, max 500), &offset=0
     public function listItems(): void
     {
         $auth     = MeridianAuth::require('analyst');
@@ -270,7 +255,6 @@ class MeridianContentIndexerController
             return;
         }
 
-        // Resolve brand for ownership check
         if ($sourceId > 0) {
             $source = DB::table('meridian_brand_content_sources')
                 ->where('id', $sourceId)
@@ -286,9 +270,9 @@ class MeridianContentIndexerController
 
         $this->fetchBrandOrAbort($brandId, $auth);
 
+        // Note: items table has no deleted_at column — refreshed by crawl, not soft-deleted.
         $q = DB::table('meridian_brand_content_items')
-            ->where('brand_id', $brandId)
-            ->whereNull('deleted_at');
+            ->where('brand_id', $brandId);
 
         if ($sourceId > 0) {
             $q->where('source_id', $sourceId);
@@ -322,9 +306,9 @@ class MeridianContentIndexerController
             return;
         }
 
+        // Note: items table has no deleted_at column.
         $item = DB::table('meridian_brand_content_items')
             ->where('id', $itemId)
-            ->whereNull('deleted_at')
             ->first();
 
         if (!$item) {
@@ -340,10 +324,6 @@ class MeridianContentIndexerController
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    /**
-     * Fetch a brand and verify the authed user can access it.
-     * Aborts 404 if missing, 403 if cross-agency (and not superadmin).
-     */
     private function fetchBrandOrAbort(int $brandId, MeridianAuth $auth): object
     {
         $brand = DB::table('meridian_brands')
@@ -366,7 +346,6 @@ class MeridianContentIndexerController
         return $brand;
     }
 
-    /** Shape a source row for API output. */
     private function shapeSource(object $s): array
     {
         return [
@@ -385,28 +364,24 @@ class MeridianContentIndexerController
         ];
     }
 
-    /**
-     * Shape an item row for API output.
-     * $full=true includes content_text and content_html (large fields).
-     */
     private function shapeItem(object $i, bool $full): array
     {
         $base = [
-            'id'                 => (int)$i->id,
-            'brandId'            => (int)$i->brand_id,
-            'sourceId'           => (int)$i->source_id,
-            'url'                => $i->url,
-            'urlCanonical'       => $i->url_canonical,
-            'title'              => $i->title,
-            'publishedAt'        => $i->published_at,
-            'language'           => $i->language,
-            'contentHash'        => $i->content_hash,
-            'contentTextLength'  => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
-            'embeddingStatus'    => $i->embedding_status ?? null,
+            'id'                   => (int)$i->id,
+            'brandId'              => (int)$i->brand_id,
+            'sourceId'             => (int)$i->source_id,
+            'url'                  => $i->url,
+            'urlCanonical'         => $i->url_canonical,
+            'title'                => $i->title,
+            'publishedAt'          => $i->published_at,
+            'language'             => $i->language,
+            'contentHash'          => $i->content_hash,
+            'contentTextLength'    => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
+            'embeddingStatus'      => $i->embedding_status ?? null,
             'classificationStatus' => $i->classification_status ?? null,
-            'crawledAt'          => $i->crawled_at ?? null,
-            'createdAt'          => $i->created_at,
-            'updatedAt'          => $i->updated_at,
+            'crawledAt'            => $i->crawled_at ?? null,
+            'createdAt'            => $i->created_at,
+            'updatedAt'            => $i->updated_at,
         ];
 
         if ($full) {
