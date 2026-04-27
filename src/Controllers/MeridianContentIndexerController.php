@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aivo\Controllers;
 
 use Aivo\Meridian\MeridianAuth;
+use Aivo\Meridian\MeridianContentCrawler;
 use Illuminate\Database\Capsule\Manager as DB;
 
 /**
@@ -13,12 +14,13 @@ use Illuminate\Database\Capsule\Manager as DB;
  * ORBIT Phase 1 — brand content indexing.
  *
  * Endpoints:
- *   GET  /api/meridian/content-sources             — list sources for a brand
- *   POST /api/meridian/content-sources/create      — register a new source
- *   POST /api/meridian/content-sources/crawl       — trigger background crawl worker
- *   POST /api/meridian/content-sources/delete      — soft-delete a source
- *   GET  /api/meridian/content-items               — list crawled items
- *   GET  /api/meridian/content-items/detail        — single item detail
+ *   GET  /api/meridian/content-sources                     — list sources for a brand
+ *   POST /api/meridian/content-sources/create              — register a new source
+ *   POST /api/meridian/content-sources/crawl               — fire-and-forget background crawl
+ *   POST /api/meridian/content-sources/debug-crawl-sync    — DIAGNOSTIC: synchronous crawl
+ *   POST /api/meridian/content-sources/delete              — soft-delete a source
+ *   GET  /api/meridian/content-items                       — list crawled items
+ *   GET  /api/meridian/content-items/detail                — single item detail
  *
  * Note: meridian_brand_content_sources HAS deleted_at (soft-delete supported).
  *       meridian_brand_content_items   does NOT (refreshed by crawl, not deleted).
@@ -30,7 +32,10 @@ class MeridianContentIndexerController
     private const STATUS_COMPLETED = 'completed';
     private const STATUS_FAILED    = 'failed';
 
-    private const ALLOWED_SOURCE_TYPES = ['sitemap', 'feed', 'page_list', 'single_page'];
+    // Must match the schema CHECK constraint on meridian_brand_content_sources.source_type.
+    // Phase 1 only implements 'sitemap' in the worker — others will throw "not yet supported"
+    // at crawl time, but are accepted into the DB so they can be registered ahead of Phase 2.
+    private const ALLOWED_SOURCE_TYPES = ['sitemap', 'content_hub', 'rss', 'knowledge_base', 'document_repo'];
 
     // ── GET /api/meridian/content-sources?brand_id=X ─────────────
     public function listSources(): void
@@ -96,13 +101,6 @@ class MeridianContentIndexerController
 
         $this->fetchBrandOrAbort($brandId, $auth);
 
-        if ($sourceType !== 'sitemap') {
-            log_error('[ORBIT] Non-sitemap source_type registered (Phase 1 worker will reject)', [
-                'brand_id'    => $brandId,
-                'source_type' => $sourceType,
-            ]);
-        }
-
         try {
             $sourceId = DB::table('meridian_brand_content_sources')->insertGetId([
                 'brand_id'           => $brandId,
@@ -110,6 +108,7 @@ class MeridianContentIndexerController
                 'source_type'        => $sourceType,
                 'crawl_cadence_days' => $cadenceDays,
                 'status'             => self::STATUS_PENDING,
+                'is_active'          => true,
                 'created_at'         => now(),
                 'updated_at'         => now(),
             ]);
@@ -130,6 +129,7 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-sources/crawl ─────────────────
+    // Fire-and-forget background worker.
     public function triggerCrawl(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -204,6 +204,108 @@ class MeridianContentIndexerController
         ]);
     }
 
+    // ── POST /api/meridian/content-sources/debug-crawl-sync ──────
+    // DIAGNOSTIC ONLY: runs the crawler synchronously inside the HTTP request.
+    // Useful when the background worker (exec) is suspected to be silently failing.
+    // Bypasses the "already crawling" guard. Returns full stats or full error trace.
+    // Set curl --max-time 180 when calling this — small sites take 30–60s.
+    public function debugCrawlSync(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $sourceId = (int)($body['source_id'] ?? 0);
+        if ($sourceId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'source_id is required.']);
+            return;
+        }
+
+        $source = DB::table('meridian_brand_content_sources')
+            ->where('id', $sourceId)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$source) {
+            http_response_code(404);
+            json_response(['error' => 'Source not found.']);
+            return;
+        }
+
+        $this->fetchBrandOrAbort((int)$source->brand_id, $auth);
+
+        // Bypass "already crawling" guard — diagnostic mode.
+        // Reset status so we have a clean slate.
+        DB::table('meridian_brand_content_sources')
+            ->where('id', $sourceId)
+            ->update([
+                'status'     => self::STATUS_CRAWLING,
+                'last_error' => null,
+                'is_active'  => true,
+                'updated_at' => now(),
+            ]);
+
+        // Re-load with the fresh state (worker reads is_active and bails if false).
+        $source = DB::table('meridian_brand_content_sources')->where('id', $sourceId)->first();
+
+        @set_time_limit(180);
+        @ini_set('memory_limit', '512M');
+
+        $startedAt = microtime(true);
+
+        try {
+            $crawler = new MeridianContentCrawler($sourceId);
+            $stats   = $crawler->run();
+
+            $elapsedSec   = round(microtime(true) - $startedAt, 2);
+            $totalIndexed = (int)($stats['indexed'] ?? 0) + (int)($stats['skipped'] ?? 0);
+
+            $cadenceDays = (int)($source->crawl_cadence_days ?: 30);
+            $nextCrawl   = $cadenceDays > 0
+                ? date('Y-m-d H:i:s', time() + ($cadenceDays * 86400))
+                : null;
+
+            DB::table('meridian_brand_content_sources')
+                ->where('id', $sourceId)
+                ->update([
+                    'status'          => self::STATUS_COMPLETED,
+                    'last_crawled_at' => now(),
+                    'next_crawl_at'   => $nextCrawl,
+                    'items_indexed'   => $totalIndexed,
+                    'last_error'      => null,
+                    'updated_at'      => now(),
+                ]);
+
+            json_response([
+                'status'       => 'completed',
+                'sourceId'     => $sourceId,
+                'elapsedSec'   => $elapsedSec,
+                'stats'        => $stats,
+                'totalIndexed' => $totalIndexed,
+            ]);
+        } catch (\Throwable $e) {
+            $elapsedSec = round(microtime(true) - $startedAt, 2);
+            $msg        = $e->getMessage();
+
+            DB::table('meridian_brand_content_sources')
+                ->where('id', $sourceId)
+                ->update([
+                    'status'     => self::STATUS_FAILED,
+                    'last_error' => mb_substr($msg, 0, 1000),
+                    'updated_at' => now(),
+                ]);
+
+            http_response_code(500);
+            json_response([
+                'status'     => 'failed',
+                'sourceId'   => $sourceId,
+                'elapsedSec' => $elapsedSec,
+                'error'      => $msg,
+                'trace'      => $e->getTraceAsString(),
+            ]);
+        }
+    }
+
     // ── POST /api/meridian/content-sources/delete ────────────────
     public function deleteSource(): void
     {
@@ -270,7 +372,7 @@ class MeridianContentIndexerController
 
         $this->fetchBrandOrAbort($brandId, $auth);
 
-        // Note: items table has no deleted_at column — refreshed by crawl, not soft-deleted.
+        // Note: items table has no deleted_at column.
         $q = DB::table('meridian_brand_content_items')
             ->where('brand_id', $brandId);
 
@@ -306,7 +408,6 @@ class MeridianContentIndexerController
             return;
         }
 
-        // Note: items table has no deleted_at column.
         $item = DB::table('meridian_brand_content_items')
             ->where('id', $itemId)
             ->first();
@@ -349,44 +450,46 @@ class MeridianContentIndexerController
     private function shapeSource(object $s): array
     {
         return [
-            'id'                 => (int)$s->id,
-            'brandId'            => (int)$s->brand_id,
-            'sourceUrl'          => $s->source_url,
-            'sourceType'         => $s->source_type,
-            'status'             => $s->status,
-            'crawlCadenceDays'   => (int)$s->crawl_cadence_days,
-            'lastCrawledAt'      => $s->last_crawled_at,
-            'nextCrawlAt'        => $s->next_crawl_at,
-            'itemsIndexed'       => isset($s->items_indexed) ? (int)$s->items_indexed : 0,
-            'lastError'          => $s->last_error,
-            'createdAt'          => $s->created_at,
-            'updatedAt'          => $s->updated_at,
+            'id'               => (int)$s->id,
+            'brandId'          => (int)$s->brand_id,
+            'sourceUrl'        => $s->source_url,
+            'sourceType'       => $s->source_type,
+            'status'           => $s->status,
+            'isActive'         => isset($s->is_active) ? (bool)$s->is_active : null,
+            'crawlCadenceDays' => (int)$s->crawl_cadence_days,
+            'lastCrawledAt'    => $s->last_crawled_at,
+            'nextCrawlAt'      => $s->next_crawl_at,
+            'itemsIndexed'     => isset($s->items_indexed) ? (int)$s->items_indexed : 0,
+            'lastError'        => $s->last_error,
+            'createdAt'        => $s->created_at,
+            'updatedAt'        => $s->updated_at,
         ];
     }
 
     private function shapeItem(object $i, bool $full): array
     {
+        // Items table has no created_at/updated_at — only first_indexed_at/last_indexed_at.
         $base = [
-            'id'                   => (int)$i->id,
-            'brandId'              => (int)$i->brand_id,
-            'sourceId'             => (int)$i->source_id,
-            'url'                  => $i->url,
-            'urlCanonical'         => $i->url_canonical,
-            'title'                => $i->title,
-            'publishedAt'          => $i->published_at,
-            'language'             => $i->language,
-            'contentHash'          => $i->content_hash,
-            'contentTextLength'    => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
-            'embeddingStatus'      => $i->embedding_status ?? null,
-            'classificationStatus' => $i->classification_status ?? null,
-            'crawledAt'            => $i->crawled_at ?? null,
-            'createdAt'            => $i->created_at,
-            'updatedAt'            => $i->updated_at,
+            'id'                => (int)$i->id,
+            'brandId'           => (int)$i->brand_id,
+            'sourceId'          => (int)$i->source_id,
+            'url'               => $i->url,
+            'urlCanonical'      => $i->url_canonical,
+            'title'             => $i->title,
+            'contentDate'       => $i->content_date ?? null,
+            'contentHtmlHash'   => $i->content_html_hash ?? null,
+            'contentTextLength' => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
+            'language'          => $i->language ?? null,
+            'territory'         => $i->territory ?? null,
+            'contentType'       => $i->content_type ?? null,
+            'classifiedBy'      => $i->classified_by ?? null,
+            'classifiedAt'      => $i->classified_at ?? null,
+            'firstIndexedAt'    => $i->first_indexed_at ?? null,
+            'lastIndexedAt'     => $i->last_indexed_at ?? null,
         ];
 
         if ($full) {
             $base['contentText'] = $i->content_text ?? null;
-            $base['contentHtml'] = $i->content_html ?? null;
         }
 
         return $base;
