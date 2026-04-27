@@ -6,6 +6,7 @@ namespace Aivo\Controllers;
 
 use Aivo\Meridian\MeridianAuth;
 use Aivo\Meridian\MeridianContentCrawler;
+use Aivo\Meridian\MeridianContentEmbedder;
 use Illuminate\Database\Capsule\Manager as DB;
 
 /**
@@ -21,6 +22,8 @@ use Illuminate\Database\Capsule\Manager as DB;
  *   POST /api/meridian/content-sources/delete              — soft-delete a source
  *   GET  /api/meridian/content-items                       — list crawled items
  *   GET  /api/meridian/content-items/detail                — single item detail
+ *   POST /api/meridian/content-items/embed                 — fire-and-forget background embed
+ *   POST /api/meridian/content-items/debug-embed-sync      — DIAGNOSTIC: synchronous embed
  *
  * Note: meridian_brand_content_sources HAS deleted_at (soft-delete supported).
  *       meridian_brand_content_items   does NOT (refreshed by crawl, not deleted).
@@ -423,6 +426,144 @@ class MeridianContentIndexerController
         json_response(['item' => $this->shapeItem($item, true)]);
     }
 
+    // ── POST /api/meridian/content-items/embed ───────────────────
+    // Body: { brand_id, source_id? }
+    // Fire-and-forget background embedder. Returns 202 immediately.
+    public function triggerEmbed(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $brandId  = (int)($body['brand_id'] ?? 0);
+        $sourceId = isset($body['source_id']) ? (int)$body['source_id'] : null;
+
+        if ($brandId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'brand_id is required.']);
+            return;
+        }
+
+        $this->fetchBrandOrAbort($brandId, $auth);
+
+        if ($sourceId !== null) {
+            $source = DB::table('meridian_brand_content_sources')
+                ->where('id', $sourceId)
+                ->whereNull('deleted_at')
+                ->first();
+            if (!$source || (int)$source->brand_id !== $brandId) {
+                http_response_code(404);
+                json_response(['error' => 'Source not found for this brand.']);
+                return;
+            }
+        }
+
+        $pendingCount = DB::table('meridian_brand_content_items')
+            ->where('brand_id', $brandId)
+            ->whereNull('embedding')
+            ->whereNotNull('content_text')
+            ->when($sourceId !== null, fn($q) => $q->where('source_id', $sourceId))
+            ->count();
+
+        if ($pendingCount === 0) {
+            json_response([
+                'status'   => 'nothing_to_embed',
+                'brandId'  => $brandId,
+                'sourceId' => $sourceId,
+            ]);
+            return;
+        }
+
+        $workerScript = realpath(__DIR__ . '/../../workers/run_content_embed.php');
+        if ($workerScript && file_exists($workerScript)) {
+            $cmd = PHP_BINARY . ' ' . escapeshellarg($workerScript)
+                . ' ' . escapeshellarg((string)$brandId);
+            if ($sourceId !== null) {
+                $cmd .= ' ' . escapeshellarg((string)$sourceId);
+            }
+            $cmd .= ' > /dev/null 2>&1 &';
+            exec($cmd);
+        } else {
+            log_error('[ORBIT] Embedder worker script not found', [
+                'expected' => __DIR__ . '/../../workers/run_content_embed.php',
+            ]);
+            http_response_code(500);
+            json_response(['error' => 'Embedder worker script missing. Check deployment.']);
+            return;
+        }
+
+        http_response_code(202);
+        json_response([
+            'status'       => 'queued',
+            'brandId'      => $brandId,
+            'sourceId'     => $sourceId,
+            'pendingCount' => $pendingCount,
+        ]);
+    }
+
+    // ── POST /api/meridian/content-items/debug-embed-sync ────────
+    // DIAGNOSTIC: runs the embedder synchronously inside the HTTP request.
+    // Body: { brand_id, source_id? }
+    // Use curl --max-time 300 — large brands take a while.
+    public function debugEmbedSync(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $brandId  = (int)($body['brand_id'] ?? 0);
+        $sourceId = isset($body['source_id']) ? (int)$body['source_id'] : null;
+
+        if ($brandId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'brand_id is required.']);
+            return;
+        }
+
+        $this->fetchBrandOrAbort($brandId, $auth);
+
+        if ($sourceId !== null) {
+            $source = DB::table('meridian_brand_content_sources')
+                ->where('id', $sourceId)
+                ->whereNull('deleted_at')
+                ->first();
+            if (!$source || (int)$source->brand_id !== $brandId) {
+                http_response_code(404);
+                json_response(['error' => 'Source not found for this brand.']);
+                return;
+            }
+        }
+
+        @set_time_limit(300);
+        @ini_set('memory_limit', '512M');
+
+        $startedAt = microtime(true);
+
+        try {
+            $embedder = new MeridianContentEmbedder($brandId, $sourceId);
+            $stats    = $embedder->run();
+
+            $elapsedSec = round(microtime(true) - $startedAt, 2);
+
+            json_response([
+                'status'     => 'completed',
+                'brandId'    => $brandId,
+                'sourceId'   => $sourceId,
+                'elapsedSec' => $elapsedSec,
+                'stats'      => $stats,
+            ]);
+        } catch (\Throwable $e) {
+            $elapsedSec = round(microtime(true) - $startedAt, 2);
+            http_response_code(500);
+            json_response([
+                'status'     => 'failed',
+                'brandId'    => $brandId,
+                'sourceId'   => $sourceId,
+                'elapsedSec' => $elapsedSec,
+                'error'      => $e->getMessage(),
+                'trace'      => $e->getTraceAsString(),
+            ]);
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────
 
     private function fetchBrandOrAbort(int $brandId, MeridianAuth $auth): object
@@ -479,6 +620,7 @@ class MeridianContentIndexerController
             'contentDate'       => $i->content_date ?? null,
             'contentHtmlHash'   => $i->content_html_hash ?? null,
             'contentTextLength' => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
+            'hasEmbedding'      => isset($i->embedding) && $i->embedding !== null && $i->embedding !== '',
             'language'          => $i->language ?? null,
             'territory'         => $i->territory ?? null,
             'contentType'       => $i->content_type ?? null,
@@ -489,7 +631,8 @@ class MeridianContentIndexerController
         ];
 
         if ($full) {
-            $base['contentText'] = $i->content_text ?? null;
+            $base['contentText']        = $i->content_text ?? null;
+            $base['embeddingInputText'] = $i->embedding_input_text ?? null;
         }
 
         return $base;
