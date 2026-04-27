@@ -230,9 +230,10 @@ $routes = [
         '/api/meridian/reprobe/initiate'       => [MeridianReprobeController::class, 'initiate'],
 
         // ── Meridian: ORBIT Content Indexer ────────────────────
-        '/api/meridian/content-sources/create' => [MeridianContentIndexerController::class, 'createSource'],
-        '/api/meridian/content-sources/crawl'  => [MeridianContentIndexerController::class, 'triggerCrawl'],
-        '/api/meridian/content-sources/delete' => [MeridianContentIndexerController::class, 'deleteSource'],
+        '/api/meridian/content-sources/create'            => [MeridianContentIndexerController::class, 'createSource'],
+        '/api/meridian/content-sources/crawl'             => [MeridianContentIndexerController::class, 'triggerCrawl'],
+        '/api/meridian/content-sources/debug-crawl-sync'  => [MeridianContentIndexerController::class, 'debugCrawlSync'],
+        '/api/meridian/content-sources/delete'            => [MeridianContentIndexerController::class, 'deleteSource'],
     ],
 ];
 
