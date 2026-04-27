@@ -31,6 +31,7 @@ use Aivo\Controllers\MeridianAttributionController;
 use Aivo\Controllers\MeridianReprobeController;
 use Aivo\Controllers\MeridianPackageController;
 use Aivo\Controllers\MeridianGa4Controller;
+use Aivo\Controllers\MeridianContentIndexerController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -116,6 +117,11 @@ $routes = [
         // ── Meridian: Re-probe ─────────────────────────────────
         '/api/meridian/reprobe/delta'          => [MeridianReprobeController::class, 'delta'],
         '/api/meridian/reprobe/history'        => [MeridianReprobeController::class, 'history'],
+
+        // ── Meridian: ORBIT Content Indexer ────────────────────
+        '/api/meridian/content-sources'        => [MeridianContentIndexerController::class, 'listSources'],
+        '/api/meridian/content-items'          => [MeridianContentIndexerController::class, 'listItems'],
+        '/api/meridian/content-items/detail'   => [MeridianContentIndexerController::class, 'itemDetail'],
     ],
 
     'POST' => [
@@ -222,6 +228,11 @@ $routes = [
 
         // ── Meridian: Re-probe ─────────────────────────────────
         '/api/meridian/reprobe/initiate'       => [MeridianReprobeController::class, 'initiate'],
+
+        // ── Meridian: ORBIT Content Indexer ────────────────────
+        '/api/meridian/content-sources/create' => [MeridianContentIndexerController::class, 'createSource'],
+        '/api/meridian/content-sources/crawl'  => [MeridianContentIndexerController::class, 'triggerCrawl'],
+        '/api/meridian/content-sources/delete' => [MeridianContentIndexerController::class, 'deleteSource'],
     ],
 ];
 
