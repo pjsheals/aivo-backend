@@ -7,6 +7,7 @@ namespace Aivo\Controllers;
 use Aivo\Meridian\MeridianAuth;
 use Aivo\Meridian\MeridianContentCrawler;
 use Aivo\Meridian\MeridianContentEmbedder;
+use Aivo\Meridian\MeridianContentClassifier;
 use Illuminate\Database\Capsule\Manager as DB;
 
 /**
@@ -15,15 +16,17 @@ use Illuminate\Database\Capsule\Manager as DB;
  * ORBIT Phase 1 — brand content indexing.
  *
  * Endpoints:
- *   GET  /api/meridian/content-sources                     — list sources for a brand
- *   POST /api/meridian/content-sources/create              — register a new source
- *   POST /api/meridian/content-sources/crawl               — fire-and-forget background crawl
- *   POST /api/meridian/content-sources/debug-crawl-sync    — DIAGNOSTIC: synchronous crawl
- *   POST /api/meridian/content-sources/delete              — soft-delete a source
- *   GET  /api/meridian/content-items                       — list crawled items
- *   GET  /api/meridian/content-items/detail                — single item detail
- *   POST /api/meridian/content-items/embed                 — fire-and-forget background embed
- *   POST /api/meridian/content-items/debug-embed-sync      — DIAGNOSTIC: synchronous embed
+ *   GET  /api/meridian/content-sources                       — list sources for a brand
+ *   POST /api/meridian/content-sources/create                — register a new source
+ *   POST /api/meridian/content-sources/crawl                 — fire-and-forget background crawl
+ *   POST /api/meridian/content-sources/debug-crawl-sync      — DIAGNOSTIC: synchronous crawl
+ *   POST /api/meridian/content-sources/delete                — soft-delete a source
+ *   GET  /api/meridian/content-items                         — list crawled items
+ *   GET  /api/meridian/content-items/detail                  — single item detail
+ *   POST /api/meridian/content-items/embed                   — fire-and-forget background embed
+ *   POST /api/meridian/content-items/debug-embed-sync        — DIAGNOSTIC: synchronous embed
+ *   POST /api/meridian/content-items/classify                — fire-and-forget background classify
+ *   POST /api/meridian/content-items/debug-classify-sync     — DIAGNOSTIC: synchronous classify
  *
  * Note: meridian_brand_content_sources HAS deleted_at (soft-delete supported).
  *       meridian_brand_content_items   does NOT (refreshed by crawl, not deleted).
@@ -35,9 +38,8 @@ class MeridianContentIndexerController
     private const STATUS_COMPLETED = 'completed';
     private const STATUS_FAILED    = 'failed';
 
-    // Must match the schema CHECK constraint on meridian_brand_content_sources.source_type.
-    // Phase 1 only implements 'sitemap' in the worker — others will throw "not yet supported"
-    // at crawl time, but are accepted into the DB so they can be registered ahead of Phase 2.
+    // Match the SQL CHECK constraint on meridian_brand_content_sources.source_type.
+    // Phase 1 only implements 'sitemap' in the worker.
     private const ALLOWED_SOURCE_TYPES = ['sitemap', 'content_hub', 'rss', 'knowledge_base', 'document_repo'];
 
     // ── GET /api/meridian/content-sources?brand_id=X ─────────────
@@ -132,7 +134,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-sources/crawl ─────────────────
-    // Fire-and-forget background worker.
     public function triggerCrawl(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -208,10 +209,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-sources/debug-crawl-sync ──────
-    // DIAGNOSTIC ONLY: runs the crawler synchronously inside the HTTP request.
-    // Useful when the background worker (exec) is suspected to be silently failing.
-    // Bypasses the "already crawling" guard. Returns full stats or full error trace.
-    // Set curl --max-time 180 when calling this — small sites take 30–60s.
     public function debugCrawlSync(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -237,8 +234,6 @@ class MeridianContentIndexerController
 
         $this->fetchBrandOrAbort((int)$source->brand_id, $auth);
 
-        // Bypass "already crawling" guard — diagnostic mode.
-        // Reset status so we have a clean slate.
         DB::table('meridian_brand_content_sources')
             ->where('id', $sourceId)
             ->update([
@@ -248,7 +243,6 @@ class MeridianContentIndexerController
                 'updated_at' => now(),
             ]);
 
-        // Re-load with the fresh state (worker reads is_active and bails if false).
         $source = DB::table('meridian_brand_content_sources')->where('id', $sourceId)->first();
 
         @set_time_limit(180);
@@ -375,7 +369,6 @@ class MeridianContentIndexerController
 
         $this->fetchBrandOrAbort($brandId, $auth);
 
-        // Note: items table has no deleted_at column.
         $q = DB::table('meridian_brand_content_items')
             ->where('brand_id', $brandId);
 
@@ -427,8 +420,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-items/embed ───────────────────
-    // Body: { brand_id, source_id? }
-    // Fire-and-forget background embedder. Returns 202 immediately.
     public function triggerEmbed(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -501,9 +492,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-items/debug-embed-sync ────────
-    // DIAGNOSTIC: runs the embedder synchronously inside the HTTP request.
-    // Body: { brand_id, source_id? }
-    // Use curl --max-time 300 — large brands take a while.
     public function debugEmbedSync(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -540,6 +528,142 @@ class MeridianContentIndexerController
         try {
             $embedder = new MeridianContentEmbedder($brandId, $sourceId);
             $stats    = $embedder->run();
+
+            $elapsedSec = round(microtime(true) - $startedAt, 2);
+
+            json_response([
+                'status'     => 'completed',
+                'brandId'    => $brandId,
+                'sourceId'   => $sourceId,
+                'elapsedSec' => $elapsedSec,
+                'stats'      => $stats,
+            ]);
+        } catch (\Throwable $e) {
+            $elapsedSec = round(microtime(true) - $startedAt, 2);
+            http_response_code(500);
+            json_response([
+                'status'     => 'failed',
+                'brandId'    => $brandId,
+                'sourceId'   => $sourceId,
+                'elapsedSec' => $elapsedSec,
+                'error'      => $e->getMessage(),
+                'trace'      => $e->getTraceAsString(),
+            ]);
+        }
+    }
+
+    // ── POST /api/meridian/content-items/classify ────────────────
+    // Body: { brand_id, source_id? }
+    // Fire-and-forget background classifier.
+    public function triggerClassify(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $brandId  = (int)($body['brand_id'] ?? 0);
+        $sourceId = isset($body['source_id']) ? (int)$body['source_id'] : null;
+
+        if ($brandId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'brand_id is required.']);
+            return;
+        }
+
+        $this->fetchBrandOrAbort($brandId, $auth);
+
+        if ($sourceId !== null) {
+            $source = DB::table('meridian_brand_content_sources')
+                ->where('id', $sourceId)
+                ->whereNull('deleted_at')
+                ->first();
+            if (!$source || (int)$source->brand_id !== $brandId) {
+                http_response_code(404);
+                json_response(['error' => 'Source not found for this brand.']);
+                return;
+            }
+        }
+
+        $pendingCount = DB::table('meridian_brand_content_items')
+            ->where('brand_id', $brandId)
+            ->whereNull('classified_at')
+            ->whereNotNull('content_text')
+            ->when($sourceId !== null, fn($q) => $q->where('source_id', $sourceId))
+            ->count();
+
+        if ($pendingCount === 0) {
+            json_response([
+                'status'   => 'nothing_to_classify',
+                'brandId'  => $brandId,
+                'sourceId' => $sourceId,
+            ]);
+            return;
+        }
+
+        $workerScript = realpath(__DIR__ . '/../../workers/run_content_classify.php');
+        if ($workerScript && file_exists($workerScript)) {
+            $cmd = PHP_BINARY . ' ' . escapeshellarg($workerScript)
+                . ' ' . escapeshellarg((string)$brandId);
+            if ($sourceId !== null) {
+                $cmd .= ' ' . escapeshellarg((string)$sourceId);
+            }
+            $cmd .= ' > /dev/null 2>&1 &';
+            exec($cmd);
+        } else {
+            log_error('[ORBIT] Classifier worker script not found', [
+                'expected' => __DIR__ . '/../../workers/run_content_classify.php',
+            ]);
+            http_response_code(500);
+            json_response(['error' => 'Classifier worker script missing. Check deployment.']);
+            return;
+        }
+
+        http_response_code(202);
+        json_response([
+            'status'       => 'queued',
+            'brandId'      => $brandId,
+            'sourceId'     => $sourceId,
+            'pendingCount' => $pendingCount,
+        ]);
+    }
+
+    // ── POST /api/meridian/content-items/debug-classify-sync ─────
+    // DIAGNOSTIC: synchronous classify. Use curl --max-time 600 for large brands.
+    public function debugClassifySync(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $brandId  = (int)($body['brand_id'] ?? 0);
+        $sourceId = isset($body['source_id']) ? (int)$body['source_id'] : null;
+
+        if ($brandId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'brand_id is required.']);
+            return;
+        }
+
+        $this->fetchBrandOrAbort($brandId, $auth);
+
+        if ($sourceId !== null) {
+            $source = DB::table('meridian_brand_content_sources')
+                ->where('id', $sourceId)
+                ->whereNull('deleted_at')
+                ->first();
+            if (!$source || (int)$source->brand_id !== $brandId) {
+                http_response_code(404);
+                json_response(['error' => 'Source not found for this brand.']);
+                return;
+            }
+        }
+
+        @set_time_limit(600);
+        @ini_set('memory_limit', '512M');
+
+        $startedAt = microtime(true);
+
+        try {
+            $classifier = new MeridianContentClassifier($brandId, $sourceId);
+            $stats      = $classifier->run();
 
             $elapsedSec = round(microtime(true) - $startedAt, 2);
 
@@ -611,30 +735,74 @@ class MeridianContentIndexerController
     {
         // Items table has no created_at/updated_at — only first_indexed_at/last_indexed_at.
         $base = [
-            'id'                => (int)$i->id,
-            'brandId'           => (int)$i->brand_id,
-            'sourceId'          => (int)$i->source_id,
-            'url'               => $i->url,
-            'urlCanonical'      => $i->url_canonical,
-            'title'             => $i->title,
-            'contentDate'       => $i->content_date ?? null,
-            'contentHtmlHash'   => $i->content_html_hash ?? null,
-            'contentTextLength' => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
-            'hasEmbedding'      => isset($i->embedding) && $i->embedding !== null && $i->embedding !== '',
-            'language'          => $i->language ?? null,
-            'territory'         => $i->territory ?? null,
-            'contentType'       => $i->content_type ?? null,
-            'classifiedBy'      => $i->classified_by ?? null,
-            'classifiedAt'      => $i->classified_at ?? null,
-            'firstIndexedAt'    => $i->first_indexed_at ?? null,
-            'lastIndexedAt'     => $i->last_indexed_at ?? null,
+            'id'                    => (int)$i->id,
+            'brandId'               => (int)$i->brand_id,
+            'sourceId'              => (int)$i->source_id,
+            'url'                   => $i->url,
+            'urlCanonical'          => $i->url_canonical,
+            'title'                 => $i->title,
+            'contentDate'           => $i->content_date ?? null,
+            'contentHtmlHash'       => $i->content_html_hash ?? null,
+            'contentTextLength'     => isset($i->content_text) ? strlen((string)$i->content_text) : 0,
+            'wordCount'             => isset($i->word_count) ? (int)$i->word_count : null,
+            'hasEmbedding'          => isset($i->embedding) && $i->embedding !== null && $i->embedding !== '',
+            'topics'                => $this->parsePgTextArray($i->topics ?? null),
+            'subBrand'              => $i->sub_brand ?? null,
+            'territory'             => $i->territory ?? null,
+            'contentType'           => $i->content_type ?? null,
+            'language'              => $i->language ?? null,
+            'citationTierEstimate'  => $i->citation_tier_estimate ?? null,
+            'hasData'               => isset($i->has_data) ? (bool)$i->has_data : null,
+            'hasExternalCitations'  => isset($i->has_external_citations) ? (bool)$i->has_external_citations : null,
+            'hasMethodology'        => isset($i->has_methodology) ? (bool)$i->has_methodology : null,
+            'classifiedBy'          => $i->classified_by ?? null,
+            'classifiedAt'          => $i->classified_at ?? null,
+            'firstIndexedAt'        => $i->first_indexed_at ?? null,
+            'lastIndexedAt'         => $i->last_indexed_at ?? null,
         ];
 
         if ($full) {
-            $base['contentText']        = $i->content_text ?? null;
-            $base['embeddingInputText'] = $i->embedding_input_text ?? null;
+            $base['contentText']               = $i->content_text ?? null;
+            $base['embeddingInputText']        = $i->embedding_input_text ?? null;
+            $base['classificationConfidences'] = $this->parseJsonField($i->classification_confidences ?? null);
         }
 
         return $base;
+    }
+
+    /** Parse a Postgres TEXT[] column (e.g. '{"foo","bar"}') into a PHP array. */
+    private function parsePgTextArray($value): array
+    {
+        if ($value === null || $value === '' || $value === '{}') return [];
+        if (is_array($value)) return $value;
+
+        // Strip outer braces, split on comma, unquote each element.
+        $inner = trim((string)$value, '{}');
+        if ($inner === '') return [];
+
+        // Simple split — items contain quoted strings; handle commas inside via quote tracking.
+        $items = [];
+        $current = '';
+        $inQuotes = false;
+        $escape = false;
+        for ($i = 0, $n = strlen($inner); $i < $n; $i++) {
+            $ch = $inner[$i];
+            if ($escape) { $current .= $ch; $escape = false; continue; }
+            if ($ch === '\\') { $escape = true; continue; }
+            if ($ch === '"') { $inQuotes = !$inQuotes; continue; }
+            if ($ch === ',' && !$inQuotes) { $items[] = $current; $current = ''; continue; }
+            $current .= $ch;
+        }
+        if ($current !== '') $items[] = $current;
+
+        return $items;
+    }
+
+    private function parseJsonField($value): ?array
+    {
+        if ($value === null || $value === '') return null;
+        if (is_array($value)) return $value;
+        $decoded = json_decode((string)$value, true);
+        return is_array($decoded) ? $decoded : null;
     }
 }
