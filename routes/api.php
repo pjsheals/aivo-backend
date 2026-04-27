@@ -234,6 +234,8 @@ $routes = [
         '/api/meridian/content-sources/crawl'             => [MeridianContentIndexerController::class, 'triggerCrawl'],
         '/api/meridian/content-sources/debug-crawl-sync'  => [MeridianContentIndexerController::class, 'debugCrawlSync'],
         '/api/meridian/content-sources/delete'            => [MeridianContentIndexerController::class, 'deleteSource'],
+        '/api/meridian/content-items/embed'               => [MeridianContentIndexerController::class, 'triggerEmbed'],
+        '/api/meridian/content-items/debug-embed-sync'    => [MeridianContentIndexerController::class, 'debugEmbedSync'],
     ],
 ];
 
