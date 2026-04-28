@@ -33,6 +33,9 @@ use Aivo\Controllers\MeridianPackageController;
 use Aivo\Controllers\MeridianGa4Controller;
 use Aivo\Controllers\MeridianContentIndexerController;
 
+// ── ORBIT controllers (gap-triggered evidence discovery layer) ────
+use Aivo\Orbit\Controllers\OrbitTestController;
+
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri    = rtrim($uri, '/') ?: '/';
@@ -239,6 +242,9 @@ $routes = [
         '/api/meridian/content-items/classify'             => [MeridianContentIndexerController::class, 'triggerClassify'],
         '/api/meridian/content-items/debug-classify-sync'  => [MeridianContentIndexerController::class, 'debugClassifySync'],
         '/api/meridian/content-items/correct'              => [MeridianContentIndexerController::class, 'correctClassification'],
+
+        // ── ORBIT: gap-triggered evidence discovery (admin/test) ──
+        '/api/orbit/admin/test-brave'          => [OrbitTestController::class, 'testBrave'],
     ],
 ];
 
