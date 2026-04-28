@@ -238,6 +238,7 @@ $routes = [
         '/api/meridian/content-items/debug-embed-sync'     => [MeridianContentIndexerController::class, 'debugEmbedSync'],
         '/api/meridian/content-items/classify'             => [MeridianContentIndexerController::class, 'triggerClassify'],
         '/api/meridian/content-items/debug-classify-sync'  => [MeridianContentIndexerController::class, 'debugClassifySync'],
+        '/api/meridian/content-items/correct'              => [MeridianContentIndexerController::class, 'correctClassification'],
     ],
 ];
 
