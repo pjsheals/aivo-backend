@@ -13,7 +13,7 @@ use Illuminate\Database\Capsule\Manager as DB;
 /**
  * MeridianContentIndexerController
  *
- * ORBIT Phase 1 — brand content indexing.
+ * ORBIT Phase 1 — brand content indexing (Radar UI).
  *
  * Endpoints:
  *   GET  /api/meridian/content-sources                       — list sources for a brand
@@ -27,6 +27,7 @@ use Illuminate\Database\Capsule\Manager as DB;
  *   POST /api/meridian/content-items/debug-embed-sync        — DIAGNOSTIC: synchronous embed
  *   POST /api/meridian/content-items/classify                — fire-and-forget background classify
  *   POST /api/meridian/content-items/debug-classify-sync     — DIAGNOSTIC: synchronous classify
+ *   POST /api/meridian/content-items/correct                 — apply user correction + audit log
  *
  * Note: meridian_brand_content_sources HAS deleted_at (soft-delete supported).
  *       meridian_brand_content_items   does NOT (refreshed by crawl, not deleted).
@@ -38,9 +39,11 @@ class MeridianContentIndexerController
     private const STATUS_COMPLETED = 'completed';
     private const STATUS_FAILED    = 'failed';
 
-    // Match the SQL CHECK constraint on meridian_brand_content_sources.source_type.
-    // Phase 1 only implements 'sitemap' in the worker.
     private const ALLOWED_SOURCE_TYPES = ['sitemap', 'content_hub', 'rss', 'knowledge_base', 'document_repo'];
+
+    // Match the SQL CHECK constraint on meridian_brand_content_classifications_log.axis.
+    // Only these axes are user-correctable; T-tier and evidence signals are machine-only.
+    private const CORRECTABLE_AXES = ['topics', 'sub_brand', 'territory', 'content_type', 'content_date', 'language'];
 
     // ── GET /api/meridian/content-sources?brand_id=X ─────────────
     public function listSources(): void
@@ -553,8 +556,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-items/classify ────────────────
-    // Body: { brand_id, source_id? }
-    // Fire-and-forget background classifier.
     public function triggerClassify(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -627,7 +628,6 @@ class MeridianContentIndexerController
     }
 
     // ── POST /api/meridian/content-items/debug-classify-sync ─────
-    // DIAGNOSTIC: synchronous classify. Use curl --max-time 600 for large brands.
     public function debugClassifySync(): void
     {
         $auth = MeridianAuth::require('admin');
@@ -688,6 +688,199 @@ class MeridianContentIndexerController
         }
     }
 
+    // ── POST /api/meridian/content-items/correct ────────────────────
+    // Body: { item_id, axis, new_value, reason? }
+    //
+    // Applies a user correction to one classification axis. Writes both:
+    //   - items table (the corrected value)
+    //   - classifications_log (audit trail of what changed and by whom)
+    //
+    // Only axes in CORRECTABLE_AXES are accepted (matches the SQL CHECK constraint
+    // on meridian_brand_content_classifications_log.axis). T-tier and evidence
+    // signals are machine-only — not user-correctable in Phase 1.
+    public function correctClassification(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $itemId   = (int)($body['item_id'] ?? 0);
+        $axis     = strtolower(trim((string)($body['axis'] ?? '')));
+        $reason   = trim((string)($body['reason'] ?? ''));
+        $newValue = $body['new_value'] ?? null;  // can be string, array, or null
+
+        if ($itemId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'item_id is required.']);
+            return;
+        }
+        if (!in_array($axis, self::CORRECTABLE_AXES, true)) {
+            http_response_code(400);
+            json_response([
+                'error'     => 'Axis is not user-correctable.',
+                'allowed'   => self::CORRECTABLE_AXES,
+                'requested' => $axis,
+            ]);
+            return;
+        }
+
+        $item = DB::table('meridian_brand_content_items')->where('id', $itemId)->first();
+        if (!$item) {
+            http_response_code(404);
+            json_response(['error' => 'Item not found.']);
+            return;
+        }
+
+        $this->fetchBrandOrAbort((int)$item->brand_id, $auth);
+
+        // Capture previous value for audit trail (per-axis logic).
+        $previousValue = match ($axis) {
+            'topics'       => $this->parsePgTextArray($item->topics ?? null),
+            'sub_brand'    => $item->sub_brand ?? null,
+            'territory'    => $item->territory ?? null,
+            'content_type' => $item->content_type ?? null,
+            'content_date' => $item->content_date ?? null,
+            'language'     => $item->language ?? null,
+        };
+
+        // Validate + normalise new value per axis.
+        try {
+            $normalised = $this->normaliseCorrectionValue($axis, $newValue);
+        } catch (\InvalidArgumentException $e) {
+            http_response_code(400);
+            json_response(['error' => $e->getMessage()]);
+            return;
+        }
+
+        // Write audit log row first — if the items update fails we still know what was attempted.
+        // Schema columns (per migration 001):
+        //   item_id, brand_id, user_id, axis, previous_value, new_value, rationale, created_at
+        // brand_id is NOT NULL and denormalised onto the log table for fast brand-scoped audit queries.
+        // The API parameter is 'reason' (user-friendly) but the column is 'rationale' (per schema).
+        try {
+            DB::table('meridian_brand_content_classifications_log')->insert([
+                'item_id'        => $itemId,
+                'brand_id'       => (int)$item->brand_id,
+                'user_id'        => $auth->user_id ?? null,
+                'axis'           => $axis,
+                'previous_value' => json_encode($previousValue, JSON_UNESCAPED_SLASHES),
+                'new_value'      => json_encode($normalised['logged'], JSON_UNESCAPED_SLASHES),
+                'rationale'      => $reason !== '' ? mb_substr($reason, 0, 500) : null,
+                'created_at'     => now(),
+            ]);
+        } catch (\Throwable $e) {
+            log_error('[ORBIT] correction audit log insert failed', [
+                'item_id' => $itemId,
+                'axis'    => $axis,
+                'error'   => $e->getMessage(),
+            ]);
+            http_response_code(500);
+            json_response(['error' => 'Failed to write audit log entry.']);
+            return;
+        }
+
+        // Apply the correction to the items table.
+        try {
+            if ($axis === 'topics') {
+                // TEXT[] needs explicit ::text[] cast (same pattern as classifier).
+                DB::statement(
+                    'UPDATE meridian_brand_content_items
+                        SET topics = ?::text[]
+                        WHERE id = ?',
+                    [$this->toPgTextArray($normalised['stored']), $itemId]
+                );
+            } else {
+                // Plain string columns — direct update is fine.
+                DB::table('meridian_brand_content_items')
+                    ->where('id', $itemId)
+                    ->update([$axis => $normalised['stored']]);
+            }
+        } catch (\Throwable $e) {
+            log_error('[ORBIT] correction items update failed', [
+                'item_id' => $itemId,
+                'axis'    => $axis,
+                'error'   => $e->getMessage(),
+            ]);
+            http_response_code(500);
+            json_response([
+                'error' => 'Audit log written but items update failed. Item is in inconsistent state.',
+                'detail' => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        // Return refreshed item.
+        $fresh = DB::table('meridian_brand_content_items')->where('id', $itemId)->first();
+        json_response([
+            'status'        => 'corrected',
+            'itemId'        => $itemId,
+            'axis'          => $axis,
+            'previousValue' => $previousValue,
+            'newValue'      => $normalised['logged'],
+            'item'          => $this->shapeItem($fresh, true),
+        ]);
+    }
+
+    /**
+     * Validate and normalise a correction value for a given axis.
+     * Returns ['stored' => value-to-write-to-DB, 'logged' => value-for-audit-log].
+     * Throws InvalidArgumentException on validation failure.
+     */
+    private function normaliseCorrectionValue(string $axis, $rawValue): array
+    {
+        switch ($axis) {
+            case 'topics':
+                if (!is_array($rawValue)) {
+                    throw new \InvalidArgumentException('topics must be an array of strings.');
+                }
+                $clean = array_values(array_unique(array_filter(array_map(
+                    fn($t) => trim((string)$t),
+                    $rawValue
+                ))));
+                $clean = array_slice($clean, 0, 5);  // hard cap at 5
+                return ['stored' => $clean, 'logged' => $clean];
+
+            case 'sub_brand':
+            case 'territory':
+            case 'language':
+                if ($rawValue === null) {
+                    return ['stored' => null, 'logged' => null];
+                }
+                if (!is_string($rawValue)) {
+                    throw new \InvalidArgumentException("$axis must be a string or null.");
+                }
+                $s = trim($rawValue);
+                $v = $s === '' ? null : $s;
+                return ['stored' => $v, 'logged' => $v];
+
+            case 'content_type':
+                if (!is_string($rawValue)) {
+                    throw new \InvalidArgumentException('content_type must be a string.');
+                }
+                $allowed = ['product', 'article', 'case_study', 'legal', 'landing',
+                            'documentation', 'pricing', 'homepage', 'about', 'contact', 'other'];
+                $v = strtolower(trim($rawValue));
+                if (!in_array($v, $allowed, true)) {
+                    throw new \InvalidArgumentException(
+                        'content_type must be one of: ' . implode(', ', $allowed)
+                    );
+                }
+                return ['stored' => $v, 'logged' => $v];
+
+            case 'content_date':
+                if ($rawValue === null || $rawValue === '') {
+                    return ['stored' => null, 'logged' => null];
+                }
+                if (!is_string($rawValue) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $rawValue)) {
+                    throw new \InvalidArgumentException('content_date must be YYYY-MM-DD or null.');
+                }
+                return ['stored' => $rawValue, 'logged' => $rawValue];
+
+            default:
+                // Should be unreachable — caller validates axis against CORRECTABLE_AXES first.
+                throw new \InvalidArgumentException("Unsupported axis: $axis");
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────
 
     private function fetchBrandOrAbort(int $brandId, MeridianAuth $auth): object
@@ -733,7 +926,6 @@ class MeridianContentIndexerController
 
     private function shapeItem(object $i, bool $full): array
     {
-        // Items table has no created_at/updated_at — only first_indexed_at/last_indexed_at.
         $base = [
             'id'                    => (int)$i->id,
             'brandId'               => (int)$i->brand_id,
@@ -776,11 +968,9 @@ class MeridianContentIndexerController
         if ($value === null || $value === '' || $value === '{}') return [];
         if (is_array($value)) return $value;
 
-        // Strip outer braces, split on comma, unquote each element.
         $inner = trim((string)$value, '{}');
         if ($inner === '') return [];
 
-        // Simple split — items contain quoted strings; handle commas inside via quote tracking.
         $items = [];
         $current = '';
         $inQuotes = false;
@@ -796,6 +986,17 @@ class MeridianContentIndexerController
         if ($current !== '') $items[] = $current;
 
         return $items;
+    }
+
+    /** Format an array of strings as a Postgres TEXT[] literal: '{"a","b","c"}'. */
+    private function toPgTextArray(array $items): string
+    {
+        if (empty($items)) return '{}';
+        $escaped = array_map(function ($item) {
+            $s = str_replace(['\\', '"'], ['\\\\', '\\"'], (string)$item);
+            return '"' . $s . '"';
+        }, $items);
+        return '{' . implode(',', $escaped) . '}';
     }
 
     private function parseJsonField($value): ?array
