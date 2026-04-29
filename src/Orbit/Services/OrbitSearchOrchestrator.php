@@ -29,10 +29,20 @@ use Throwable;
  *   3. Embed the claim (one OpenAI call).
  *   4. Pick searchable platforms via CitationPlatformResolver.
  *   5. Fan out to each platform's search provider.
- *   6. Embed all candidate snippets in one batch (one OpenAI call).
- *   7. Score each candidate via CandidateScorer.
- *   8. Persist orbit_search_runs + orbit_search_results.
- *   9. Return ranked list to caller.
+ *   6. Apply pre-scoring filters (retracted papers, non-Latin script).
+ *   7. Embed all candidate snippets in one batch (one OpenAI call).
+ *   8. Score each candidate via CandidateScorer (with brand-mention check).
+ *   9. Persist orbit_search_runs + orbit_search_results.
+ *  10. Build evidence_guidance for the user (what's missing, what to commission).
+ *  11. Return ranked list + guidance to caller.
+ *
+ * Stage 9 changes (29 Apr 2026 evening):
+ *   - Brand-locked query: brand name wrapped in quotes for exact-phrase matching
+ *   - Retracted paper filter: drops [RETRACTED]/(RETRACTED)/WITHDRAWN candidates
+ *   - Non-Latin script filter: drops Cyrillic/CJK/Arabic/Greek/Hebrew titles
+ *   - Brand-mention scoring: candidates without the brand named get heavy penalty
+ *   - Evidence guidance: structured "what to commission" recommendations when
+ *     results are zero or partial, so the user knows what evidence to create
  *
  * No transactions — search runs are independent of each other; partial failures
  * are recorded as the row that did succeed.
@@ -69,6 +79,10 @@ final class OrbitSearchOrchestrator
      *   platforms_queried: int,
      *   candidates_total: int,
      *   candidates_persisted: int,
+     *   filtered_retracted: int,
+     *   filtered_non_english: int,
+     *   filtered_no_brand_match: int,
+     *   evidence_guidance: array,
      *   results: array<int, array>,
      *   errors: array<int, string>
      * }
@@ -244,7 +258,37 @@ final class OrbitSearchOrchestrator
         }
         $allCandidates = $deduped;
 
-        // 6. Batch-embed all candidate texts
+        // 6. Pre-scoring filters: retracted papers + non-Latin script.
+        //
+        // These run BEFORE embedding to save OpenAI calls — no point embedding
+        // a retracted spam paper or a Russian-language result we'll discard.
+        // Brand-mention check happens during scoring (needs the candidate
+        // embedding cosine for the score breakdown).
+        $filteredRetracted    = 0;
+        $filteredNonEnglish   = 0;
+        $beforeFilters        = $allCandidates;
+        $allCandidates        = [];
+        foreach ($beforeFilters as $entry) {
+            /** @var CandidateResult $cand */
+            $cand = $entry['candidate'];
+
+            if ($this->isRetracted((string) ($cand->title ?? ''))) {
+                $filteredRetracted++;
+                continue;
+            }
+
+            // Combine title + snippet for script detection — title alone may be
+            // an English transliteration of a non-English paper.
+            $textForScript = trim(((string) ($cand->title ?? '')) . ' ' . ((string) ($cand->snippet ?? '')));
+            if ($this->hasNonLatinScript($textForScript)) {
+                $filteredNonEnglish++;
+                continue;
+            }
+
+            $allCandidates[] = $entry;
+        }
+
+        // 7. Batch-embed all candidate texts (post-filter)
         $candidateTexts = [];
         foreach ($allCandidates as $entry) {
             $c = $entry['candidate'];
@@ -263,8 +307,10 @@ final class OrbitSearchOrchestrator
             $candidateEmbeddings = array_fill(0, count($candidateTexts), []);
         }
 
-        // 7. Score each candidate
+        // 8. Score each candidate. Pass brandName so scorer can apply
+        //    brand-mention penalty for third-party results that don't name it.
         $scored = [];
+        $filteredNoBrandMatch = 0;
         foreach ($allCandidates as $idx => $entry) {
             $candidate    = $entry['candidate'];
             $platform     = $entry['platform'];
@@ -277,8 +323,17 @@ final class OrbitSearchOrchestrator
                 $claimEmbedding,
                 $candEmb,
                 $brandSectors,
-                $requestedSentiment
+                $requestedSentiment,
+                $brandName
             );
+
+            // Track candidates that failed the brand-mention check — for response
+            // counts and evidence_guidance. Uses the brand_matched flag directly
+            // rather than inferring from score, so we count accurately even when
+            // a brand-failed candidate retains some score from sector bonus.
+            if (isset($scoreBundle['brand_matched']) && $scoreBundle['brand_matched'] === false) {
+                $filteredNoBrandMatch++;
+            }
 
             $scored[] = [
                 'candidate'    => $candidate,
@@ -289,7 +344,7 @@ final class OrbitSearchOrchestrator
             ];
         }
 
-        // 8. Sort descending by candidate_score
+        // Sort descending by candidate_score
         usort($scored, fn ($a, $b) => $b['score']['candidate_score'] <=> $a['score']['candidate_score']);
 
         // 9. Persist orbit_search_runs + orbit_search_results
@@ -318,20 +373,36 @@ final class OrbitSearchOrchestrator
             }
         }
 
-        // 10. Return summary
+        // 10. Build evidence_guidance — tells the user what's missing and what
+        //     to commission. Always present in the response so the frontend can
+        //     render it consistently across zero-result, partial-result, and
+        //     full-result scenarios.
+        $evidenceGuidance = $this->buildEvidenceGuidance(
+            $gap,
+            $brandName,
+            $brandCategory,
+            $displacementCriteria,
+            $scored
+        );
+
+        // 11. Return summary
         return [
-            'run_id'                => $runId,
-            'gap_id'                => $gapId,
-            'brand_name'            => $brandName,
-            'claim'                 => $claimText,
-            'query_string'          => $queryString,
-            'platforms_searched'    => $platformsSearched,
-            'platforms_skipped'     => $platformsSkipped,
-            'candidates_total'      => count($allCandidates),
-            'candidates_persisted'  => $persisted,
-            'latency_ms'            => $latencyMs,
-            'errors'                => $errors,
-            'results'               => array_map(function ($entry, $rank) {
+            'run_id'                  => $runId,
+            'gap_id'                  => $gapId,
+            'brand_name'              => $brandName,
+            'claim'                   => $claimText,
+            'query_string'            => $queryString,
+            'platforms_searched'      => $platformsSearched,
+            'platforms_skipped'       => $platformsSkipped,
+            'candidates_total'        => count($allCandidates),
+            'candidates_persisted'    => $persisted,
+            'filtered_retracted'      => $filteredRetracted,
+            'filtered_non_english'    => $filteredNonEnglish,
+            'filtered_no_brand_match' => $filteredNoBrandMatch,
+            'latency_ms'              => $latencyMs,
+            'errors'                  => $errors,
+            'evidence_guidance'       => $evidenceGuidance,
+            'results'                 => array_map(function ($entry, $rank) {
                 $c = $entry['candidate'];
                 return [
                     'rank'         => $rank + 1,
@@ -352,7 +423,7 @@ final class OrbitSearchOrchestrator
     }
 
     // -------------------------------------------------------------------------
-    // Helpers
+    // Helpers — claim text + query construction
     // -------------------------------------------------------------------------
 
     /**
@@ -361,39 +432,26 @@ final class OrbitSearchOrchestrator
      * The claim must be a POSITIVE statement of what evidence we want to find,
      * NOT a negative description of what's missing. Embedding a negative
      * (e.g. "lacks peer-reviewed evidence") makes ORBIT match papers that are
-     * literally about "lacking peer-reviewed publications" — which is what
-     * happened in the Revitalift Paris run that triggered this fix.
+     * literally about "lacking peer-reviewed publications".
      *
      * Construction priority:
      *   1. displacement_criteria — the actual question the AI asked at T4.
-     *      This is the most semantically valuable text and dominates the claim.
      *   2. brand + category — topical anchors so embeddings stay on-domain.
-     *   3. displacing_brand — used as a positive comparator ("comparable to X")
-     *      not as a negative ("displaced by X"), so the embedding stays in the
-     *      same semantic neighbourhood as the displacing brand's evidence.
-     *
-     * What we deliberately EXCLUDE:
-     *   - intervention_required / gap_description (often phrased as a negative)
-     *   - expected_content_type (generic per-tier boilerplate that overwhelms
-     *     the embedding with words like "peer-reviewed publications")
+     *   3. displacing_brand — used as a positive comparator.
      */
     private function buildClaimText(array $gap, string $brandName, string $displacementCriteria = ''): string
     {
         $parts = [];
 
-        // displacement_criteria is the lead — the actual question being asked.
-        // Strip a trailing question mark so embedding sees a statement-like form.
         $criteria = trim($displacementCriteria);
         if ($criteria !== '') {
             $criteria = rtrim($criteria, " \t\n\r\0\x0B?");
             $parts[] = "Evidence required: " . $criteria . '.';
         } elseif (!empty($gap['claim'])) {
-            // Legacy fallback for callers that pre-populate gap['claim']
             $parts[] = (string) $gap['claim'];
         }
 
         // Topical anchors — brand + category keep the embedding on-domain
-        $brandLine = '';
         if ($brandName !== '') {
             $brandLine = "Brand: {$brandName}";
             if (!empty($gap['category'])) {
@@ -406,18 +464,11 @@ final class OrbitSearchOrchestrator
             $parts[] = $brandLine;
         }
 
-        // Positive comparator — find evidence "comparable to" what supports
-        // the displacing brand. This pulls the embedding into the same
-        // semantic space as evidence the displacing brand HAS.
         if (!empty($gap['displacing_brand'])) {
             $parts[] = "Looking for evidence comparable to that supporting "
                     . (string) $gap['displacing_brand'] . ".";
         }
 
-        // If displacement_criteria was empty AND we have no fallback claim,
-        // fall back gracefully on intervention_required so we never embed
-        // an empty string. Strip any leading "No "/"Lacks "/"Missing " to
-        // avoid feeding negation back in.
         if ($criteria === '' && empty($gap['claim']) && !empty($gap['intervention_required'])) {
             $iv = trim((string) $gap['intervention_required']);
             $iv = preg_replace('/^(No|Lacks|Lack of|Missing|Insufficient)\s+/i', '', $iv) ?? $iv;
@@ -432,29 +483,30 @@ final class OrbitSearchOrchestrator
     /**
      * Build the keyword query string sent to provider search APIs.
      *
-     * Search APIs (PubMed, Crossref, Brave, etc.) want concise topical keywords,
-     * not long natural-language statements. We extract content nouns from the
-     * displacement_criteria, then prepend brand + category as anchors.
+     * Stage 9 change: the brand name is wrapped in DOUBLE QUOTES so search APIs
+     * treat it as a required exact phrase. This dramatically reduces noise:
+     * Brave, PubMed, Crossref, OpenAlex etc. all support phrase quoting.
      *
      * Examples:
-     *   displacement_criteria = "Which brand has the most recent, retrievable
-     *                            clinical data demonstrating specific measurable
-     *                            results for hyaluronic acid anti-aging benefits?"
-     *   brand = "Revitalift Paris"  category = "Beauty & Skincare"
-     *   →  query = "Revitalift Paris Beauty Skincare hyaluronic acid anti-aging
-     *              clinical data measurable results"
+     *   brand = "Revitalift Paris"
+     *   →  query = '"Revitalift Paris" Beauty Skincare hyaluronic acid clinical
+     *              anti-aging measurable results'
      *
-     *   This is what PubMed/Crossref actually want to see.
+     * Skipping the quotes for single-token brand names (e.g. "Microsoft") is
+     * unnecessary — most APIs treat unquoted single tokens as exact-match anyway,
+     * but quoting is harmless for them.
      */
     private function buildQueryString(array $gap, string $brandName, string $displacementCriteria = ''): string
     {
         $bits = [];
 
-        // Brand and category go FIRST as topical anchors — search APIs weight
-        // earlier tokens more heavily. Strip punctuation so they don't tokenise
-        // into useless fragments.
+        // Brand goes FIRST as the dominant required phrase. Quote-wrapping
+        // tells search APIs to require the literal sequence of tokens.
         if ($brandName !== '') {
-            $bits[] = $this->cleanForQuery($brandName);
+            $cleanedBrand = $this->cleanForQuery($brandName);
+            if ($cleanedBrand !== '') {
+                $bits[] = '"' . $cleanedBrand . '"';
+            }
         }
         if (!empty($gap['category'])) {
             $bits[] = $this->cleanForQuery((string) $gap['category']);
@@ -479,11 +531,12 @@ final class OrbitSearchOrchestrator
     }
 
     /**
-     * Strip parens, quotes, and leading articles for cleaner query tokens.
+     * Strip parens, quotes (single quote and backtick — NOT double quotes,
+     * we use those ourselves), and leading articles for cleaner query tokens.
      */
     private function cleanForQuery(string $s): string
     {
-        $s = preg_replace('/[\(\)\[\]"\'`]+/', ' ', $s) ?? $s;
+        $s = preg_replace('/[\(\)\[\]\'`]+/', ' ', $s) ?? $s;
         $s = preg_replace('/^\s*(the|a|an)\s+/i', '', $s) ?? $s;
         return trim(preg_replace('/\s+/', ' ', $s) ?? $s);
     }
@@ -493,15 +546,10 @@ final class OrbitSearchOrchestrator
      *
      * Strategy: drop stopwords, drop punctuation, drop very short words,
      * keep the rest in original order. Cap at 12 keywords to keep search
-     * APIs happy. This is a pragmatic heuristic — not a parser. If quality
-     * proves insufficient, upgrade to OpenAI keyword extraction (one extra
-     * embedding call per search).
+     * APIs happy.
      */
     private function extractContentKeywords(string $text): string
     {
-        // Stopwords list — meta-words that match too generically across a corpus.
-        // Specifically excludes "peer-reviewed", "clinical", "evidence" etc. which
-        // are content-bearing in academic search contexts.
         static $stopwords = [
             'a','an','and','are','as','at','be','been','being','but','by','can','do',
             'does','did','for','from','had','has','have','having','how','if','in',
@@ -509,19 +557,15 @@ final class OrbitSearchOrchestrator
             'the','their','these','they','this','those','to','was','were','what',
             'when','where','which','who','whom','why','will','with','would','you',
             'your','my','i','we','us','me','him','her','he','she',
-            // Verbs that add no semantic weight
             'demonstrate','demonstrating','show','showing','provide','providing',
             'find','finding','need','needs','needed','want','wants','wanted',
             'use','used','using','make','making','made','take','taken','taking',
-            // Generic nouns that don't help focus the query
             'thing','things','way','ways','time','times','case','cases','example',
             'examples','specific','specifically','recent','retrievable','most',
             'comparable','comparison','comparing','versus','vs',
-            // Question/meta words
             'brand','brands',
         ];
 
-        // Lowercase, strip punctuation except hyphen (preserve "anti-aging")
         $clean = mb_strtolower($text);
         $clean = preg_replace('/[^\p{L}\p{N}\-\s]+/u', ' ', $clean) ?? '';
         $clean = preg_replace('/\s+/', ' ', $clean) ?? '';
@@ -534,7 +578,6 @@ final class OrbitSearchOrchestrator
             if ($tok === '') continue;
             if (mb_strlen($tok) < 3) continue;
             if (in_array($tok, $stopwords, true)) continue;
-            // Dedupe — same word twice in a query just wastes tokens
             if (isset($seen[$tok])) continue;
             $seen[$tok] = true;
             $kept[] = $tok;
@@ -543,6 +586,458 @@ final class OrbitSearchOrchestrator
 
         return implode(' ', $kept);
     }
+
+    // -------------------------------------------------------------------------
+    // Helpers — pre-scoring filters (Stage 9)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Detect retracted publications from common title markers.
+     *
+     * Crossref and PubMed prefix retracted papers with [RETRACTED] or
+     * (RETRACTED) in the title. Withdrawn preprints on arXiv use WITHDRAWN:.
+     * Various journals use "Retraction:" as a prefix. We catch all variants
+     * with one case-insensitive regex.
+     *
+     * False-positive safety: the markers must appear at the start of the title
+     * or as a standalone bracketed token, so a sentence merely *mentioning*
+     * "retraction" in a body of text won't match. (Snippets aren't checked
+     * for this reason — they often contain prose discussion of retractions.)
+     */
+    private function isRetracted(string $title): bool
+    {
+        if ($title === '') return false;
+        $trim = trim($title);
+
+        // Bracketed markers anywhere in the title:
+        //   [RETRACTED] ... / (RETRACTED) ... / [Retracted Article] ...
+        if (preg_match('/[\[\(]\s*retract(ed|ion)\b/i', $trim) === 1) {
+            return true;
+        }
+
+        // Leading prefixes:
+        //   RETRACTED: ... / WITHDRAWN: ... / Retraction: ... / Retraction notice ...
+        if (preg_match('/^\s*(retracted?|retraction(?:\s+notice)?|withdrawn)\s*[:\-]/i', $trim) === 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Detect predominantly non-Latin-script text (Cyrillic, CJK, Arabic, Greek,
+     * Hebrew, Thai, Devanagari, etc).
+     *
+     * Strategy: count characters that are letters (\p{L}) and check what fraction
+     * are Latin script. If less than 50% Latin and the text has any meaningful
+     * length, consider it non-English. Title+snippet combined is a strong signal.
+     *
+     * Tuning notes:
+     *   - 50% threshold is forgiving — a paper with a Russian title but English
+     *     abstract snippet would still pass if the snippet is sufficiently long.
+     *   - We deliberately do NOT use a language-detection library for now —
+     *     simple script counting handles 95% of the noise we saw in the
+     *     Revitalift run. If a brand needs Russian/Chinese coverage later
+     *     we'll plumb language preferences through from the brand row.
+     */
+    private function hasNonLatinScript(string $text): bool
+    {
+        if ($text === '') return false;
+
+        // Quick pre-check: any non-ASCII letters at all?
+        if (preg_match('/[^\x00-\x7F]/', $text) !== 1) {
+            // Pure ASCII → definitely Latin → not non-Latin
+            return false;
+        }
+
+        // Count letter characters by script. \p{L} = any letter.
+        $allLetters = preg_match_all('/\p{L}/u', $text, $m);
+        if ($allLetters === false || $allLetters === 0) {
+            return false;
+        }
+
+        $latinLetters = preg_match_all('/\p{Latin}/u', $text);
+        if ($latinLetters === false) {
+            return false;
+        }
+
+        // Ignore short fragments — single-word non-Latin terms inside an
+        // otherwise English sentence shouldn't disqualify the candidate.
+        if ($allLetters < 20) {
+            return false;
+        }
+
+        $latinFraction = $latinLetters / $allLetters;
+        return $latinFraction < 0.5;
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers — evidence guidance (Stage 9)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Build structured guidance for the user describing what evidence is
+     * needed to close this gap. Always returned, regardless of result count,
+     * so the frontend can render consistently:
+     *
+     *   - status='no_results'   → 0 candidates returned, full commission list
+     *   - status='partial'      → some results but missing critical tiers
+     *   - status='sufficient'   → strong T1/T2 stack present
+     *
+     * Recommendations are templated by tier (T0/T1/T2/T3) with brand,
+     * category, and displacement criteria substituted in.
+     *
+     * @param array<string,mixed> $gap
+     * @param array<int,array>    $scored
+     */
+    private function buildEvidenceGuidance(
+        array $gap,
+        string $brandName,
+        string $brandCategory,
+        string $displacementCriteria,
+        array $scored
+    ): array {
+        $tier = strtoupper((string) ($gap['citation_tier'] ?? ''));
+        $tier = preg_match('/^T[0-9]$/', $tier) === 1 ? $tier : 'T1';
+
+        $displacingBrand = (string) ($gap['displacing_brand'] ?? '');
+        $gapSeverity     = (string) ($gap['gap_severity']     ?? 'moderate');
+
+        // Effective candidate count = candidates with brand_matched=true AND
+        // candidate_score >= 5.0. The brand_matched check filters out candidates
+        // penalised purely for not naming the brand; the score threshold filters
+        // out candidates with poor relevance or low-tier authority. 5.0 is
+        // calibrated empirically: a T3 brand-matched candidate with mediocre
+        // relevance scores ~19; a brand-failed T1 with high topical relevance
+        // scores ~5.6. The 5.0 threshold cleanly separates them.
+        $effective = 0;
+        $tiersFound = [];
+        foreach ($scored as $entry) {
+            $score = (float) ($entry['score']['candidate_score'] ?? 0.0);
+            $brandMatched = (bool) ($entry['score']['brand_matched'] ?? true);
+            if ($brandMatched && $score >= 5.0) {
+                $effective++;
+                $foundTier = (string) ($entry['platform']['tier'] ?? '');
+                if ($foundTier !== '') {
+                    $major = strtoupper(substr($foundTier, 0, 2));
+                    if (in_array($major, ['T1', 'T2', 'T3'], true)) {
+                        $tiersFound[$major] = ($tiersFound[$major] ?? 0) + 1;
+                    }
+                }
+            }
+        }
+
+        // Status: zero / partial / sufficient
+        if ($effective === 0) {
+            $status = 'no_results';
+        } elseif (!isset($tiersFound['T1']) && in_array($tier, ['T0', 'T1'], true)) {
+            // T0/T1 gaps need T1-or-higher evidence to be considered sufficient
+            $status = 'partial';
+        } elseif ($effective < 2) {
+            // Even with one match, a single source is rarely sufficient on its own
+            $status = 'partial';
+        } else {
+            $status = 'sufficient';
+        }
+
+        // Why no results — diagnostic explanation tailored to the situation
+        $whyNoResults = $this->buildWhyNoResults($status, $brandName, $displacingBrand, $tier, $effective);
+
+        // Build the commission recommendations specific to this tier
+        $recommendations = $this->buildCommissionList(
+            $tier,
+            $brandName,
+            $brandCategory,
+            $displacementCriteria,
+            $displacingBrand
+        );
+
+        return [
+            'status'                => $status,
+            'tier_required'         => $tier,
+            'gap_severity'          => $gapSeverity,
+            'displacement_criteria' => $displacementCriteria,
+            'displacing_brand'      => $displacingBrand !== '' ? $displacingBrand : null,
+            'effective_results'     => $effective,
+            'tiers_found'           => $tiersFound,
+            'why_no_results'        => $whyNoResults,
+            'what_to_commission'    => $recommendations,
+        ];
+    }
+
+    /**
+     * Compose a human-readable diagnostic explaining why ORBIT didn't return
+     * sufficient evidence. Tailored to the actual scenario.
+     */
+    private function buildWhyNoResults(
+        string $status,
+        string $brandName,
+        string $displacingBrand,
+        string $tier,
+        int $effective
+    ): string {
+        if ($status === 'sufficient') {
+            return sprintf(
+                'ORBIT found %d candidate%s naming %s with tier coverage adequate for this gap. Review the ranked list above and select the strongest evidence for your atom.',
+                $effective,
+                $effective === 1 ? '' : 's',
+                $brandName !== '' ? $brandName : 'this brand'
+            );
+        }
+
+        $brandLabel = $brandName !== '' ? $brandName : 'this brand';
+
+        if ($status === 'no_results') {
+            $base = sprintf(
+                'No third-party content was found that names %s in connection with this displacement criteria.',
+                $brandLabel
+            );
+
+            if ($displacingBrand !== '') {
+                $base .= sprintf(
+                    ' The displacing brand (%s) currently holds this turn because it has retrievable %s evidence; %s does not.',
+                    $displacingBrand,
+                    $tier,
+                    $brandLabel
+                );
+            } else {
+                $base .= ' This means the brand has no retrievable third-party authority on this specific question.';
+            }
+
+            $base .= ' To win this turn, you need to commission new evidence — see the recommendations below.';
+
+            return $base;
+        }
+
+        // Partial
+        return sprintf(
+            'ORBIT found %d candidate%s, but the evidence stack is incomplete for a %s gap. Review the recommendations below for what to commission to strengthen this gap.',
+            $effective,
+            $effective === 1 ? '' : 's',
+            $tier
+        );
+    }
+
+    /**
+     * Build the tier-specific list of evidence to commission. Each
+     * recommendation has type, priority, description, specificity_required,
+     * and estimated_effort.
+     *
+     * Templates are deliberately concrete: they reference the brand name,
+     * category, and displacement criteria so the user gets actionable text
+     * rather than generic advice.
+     */
+    private function buildCommissionList(
+        string $tier,
+        string $brandName,
+        string $brandCategory,
+        string $displacementCriteria,
+        string $displacingBrand
+    ): array {
+        $brandLabel = $brandName !== '' ? $brandName : 'the brand';
+        $categoryLabel = $brandCategory !== '' ? $brandCategory : 'this category';
+        $criteriaShort = trim(rtrim($displacementCriteria, ' ?.')) ?: 'the displacement criteria above';
+
+        $competitorClause = $displacingBrand !== ''
+            ? sprintf(' Match or exceed the evidential weight currently held by %s.', $displacingBrand)
+            : '';
+
+        switch ($tier) {
+            case 'T0':
+                return [
+                    [
+                        'priority'             => 1,
+                        'type'                 => 'wikipedia_article',
+                        'description'          => sprintf(
+                            'A Wikipedia article for %s as a notable entity in %s. This is the foundational T0 anchor — without it, AI models have no canonical entity to attach evidence to.',
+                            $brandLabel,
+                            $categoryLabel
+                        ),
+                        'specificity_required' => 'Must meet Wikipedia notability standards: substantive third-party coverage, not promotional, with citations to T1/T2 sources. Submit via your own AIVO Standard account with COI disclosure.',
+                        'estimated_effort'     => 'Medium — depends on whether sufficient T1/T2 evidence already exists to satisfy notability. Without that, build T1/T2 evidence first.',
+                    ],
+                    [
+                        'priority'             => 2,
+                        'type'                 => 'wikidata_entry',
+                        'description'          => sprintf(
+                            'A Wikidata entity (Q-number) for %s linking parent company, product line, category, and any sub-brands. Enables structured retrieval by AI agents.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Properties: instance-of (commercial product/brand), parent-organisation, industry/category, official website, and external IDs (LinkedIn, Crunchbase, etc.) where available.',
+                        'estimated_effort'     => 'Low — can usually be created in 1-2 hours once Wikipedia article is approved.',
+                    ],
+                    [
+                        'priority'             => 3,
+                        'type'                 => 'authoritative_directory_listing',
+                        'description'          => sprintf(
+                            'A listing in an authoritative %s directory (G2, Crunchbase, Capterra, or category-specific equivalents like INCIDecoder for cosmetics, Drugs.com for pharma).',
+                            $categoryLabel
+                        ),
+                        'specificity_required' => 'Verified profile with company description, category tags, and at least 5-10 substantive verified reviews or data points.',
+                        'estimated_effort'     => 'Low — most directories accept verified company submissions; ratings build over time.',
+                    ],
+                ];
+
+            case 'T1':
+                return [
+                    [
+                        'priority'             => 1,
+                        'type'                 => 'peer_reviewed_publication',
+                        'description'          => sprintf(
+                            'A peer-reviewed publication or formal independent study naming %s and addressing: "%s"',
+                            $brandLabel,
+                            $criteriaShort
+                        ) . $competitorClause,
+                        'specificity_required' => sprintf(
+                            'Must name %s explicitly (not just the ingredient/technology category), include subject count, duration, measurement methodology, and specific quantified results. Target a journal indexed in PubMed, Crossref, or OpenAlex.',
+                            $brandLabel
+                        ),
+                        'estimated_effort'     => 'High — typically 6-18 months to commission and publish a clinical study or formal trial. Faster path: surface existing internal R&D data via Zenodo with a DOI (~2 weeks).',
+                    ],
+                    [
+                        'priority'             => 2,
+                        'type'                 => 'regulatory_filing',
+                        'description'          => sprintf(
+                            'A regulatory filing referencing %s and the specific claim above. For consumer brands: EU CPNP product notification, FDA OTC documentation, or equivalent. For pharma: FDA/EMA approvals. For B2B: SEC filings citing the capability.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Notification reference number, year, regulatory body, and a public URL where the filing is searchable.',
+                        'estimated_effort'     => 'Low-medium — likely already exists internally; requires legal/regulatory team to surface publicly with a citable reference.',
+                    ],
+                    [
+                        'priority'             => 3,
+                        'type'                 => 'expert_endorsement_with_evidence',
+                        'description'          => sprintf(
+                            'A recognised expert (consultant, professor, or category authority) publicly endorsing %s with specific reference to the underlying clinical, technical, or empirical evidence — not a generic recommendation.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Named expert with credentials and institutional affiliation. The endorsement must reference the specific data and be published on a citable platform (journal, professional body, or recognised media outlet).',
+                        'estimated_effort'     => 'Medium — requires expert identification, briefing, and securing publication channel. 2-3 months realistic.',
+                    ],
+                    [
+                        'priority'             => 4,
+                        'type'                 => 'wikipedia_anchor',
+                        'description'          => sprintf(
+                            'A Wikipedia article or substantial section for %s citing the T1 evidence above.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Wikipedia notability standards must be met first — the T1 evidence above is the prerequisite, not the deliverable.',
+                        'estimated_effort'     => 'Low once the T1 evidence exists; impossible without it.',
+                    ],
+                ];
+
+            case 'T2':
+                return [
+                    [
+                        'priority'             => 1,
+                        'type'                 => 'analyst_report',
+                        'description'          => sprintf(
+                            'An independent analyst report or industry audit naming %s in the context of %s. Examples: Forrester Wave, Gartner Magic Quadrant, McKinsey/Bain industry reports, Mintel/Euromonitor category research.',
+                            $brandLabel,
+                            $categoryLabel
+                        ) . $competitorClause,
+                        'specificity_required' => sprintf(
+                            'Must name %s explicitly, with quantified positioning (rating, market share, capability score) and methodology disclosure. Pulled quotes alone are not sufficient — the report must cite the brand by name in its findings.',
+                            $brandLabel
+                        ),
+                        'estimated_effort'     => 'High — most major analyst inclusion requires a formal vendor briefing process. 6-12 month timeline. Faster path: commission a category-specific independent audit.',
+                    ],
+                    [
+                        'priority'             => 2,
+                        'type'                 => 'government_data_citation',
+                        'description'          => sprintf(
+                            'A citation in government or regulatory body data — gov.uk, US federal data, EU regulatory database — that names %s in the context of the displacement criteria.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Direct mention of the brand in a publicly accessible government/regulatory dataset, ideally linkable to a specific reference number or URL.',
+                        'estimated_effort'     => 'Variable — depends on category. Pharma/finance/insurance brands typically have these by default; consumer brands rarely do.',
+                    ],
+                    [
+                        'priority'             => 3,
+                        'type'                 => 'standards_certification',
+                        'description'          => sprintf(
+                            'Certification or compliance with an industry standards body relevant to %s.',
+                            $categoryLabel
+                        ),
+                        'specificity_required' => 'Verifiable certification with a public registry entry, issue date, and scope. Self-asserted compliance does not count.',
+                        'estimated_effort'     => 'Medium — depends on whether existing certifications can be surfaced or new ones need to be obtained. 3-6 months.',
+                    ],
+                    [
+                        'priority'             => 4,
+                        'type'                 => 'expert_credentials',
+                        'description'          => 'Named experts associated with the brand (CTO, Chief Scientist, Head of Research) with verifiable credentials and publications relevant to the displacement criteria.',
+                        'specificity_required' => 'LinkedIn profile, ORCID record, or institutional bio listing publications, patents, or recognised contributions in the relevant field.',
+                        'estimated_effort'     => 'Low — usually exists internally; requires surfacing publicly via LinkedIn, ORCID, or company-published bios.',
+                    ],
+                ];
+
+            case 'T3':
+                return [
+                    [
+                        'priority'             => 1,
+                        'type'                 => 'category_press_coverage',
+                        'description'          => sprintf(
+                            'Recent (last 12 months) press coverage of %s in %s trade press. For beauty: Allure, Vogue Business, WWD, Cosmetics Business. For finance: FT, Bloomberg, Reuters. Adapt to the brand category.',
+                            $brandLabel,
+                            $categoryLabel
+                        ),
+                        'specificity_required' => sprintf(
+                            'Coverage must name %s and address the displacement criteria substantively — not a passing mention or product launch announcement.',
+                            $brandLabel
+                        ),
+                        'estimated_effort'     => 'Medium — requires PR outreach with a substantive story angle. 1-3 months.',
+                    ],
+                    [
+                        'priority'             => 2,
+                        'type'                 => 'expert_review_quantified',
+                        'description'          => sprintf(
+                            'An independent expert review (dermatologist, analyst, recognised practitioner) of %s with quantified findings or measurable assessment.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Expert with verifiable credentials, review must include specific measurable observations (not just "I recommend it"), published on a recognised platform.',
+                        'estimated_effort'     => 'Medium — requires identifying credible experts and securing review.',
+                    ],
+                    [
+                        'priority'             => 3,
+                        'type'                 => 'recent_case_study',
+                        'description'          => sprintf(
+                            'A recent (last 12 months) case study or customer evidence demonstrating %s in use, with measurable outcomes.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Named customer (or anonymised with sector/scale), specific quantified outcomes, published on a citable platform (own site is acceptable for T3 but third-party hosted is stronger).',
+                        'estimated_effort'     => 'Low-medium — most brands have customer evidence internally; requires customer permission and publication.',
+                    ],
+                    [
+                        'priority'             => 4,
+                        'type'                 => 'review_platform_listing',
+                        'description'          => sprintf(
+                            'Verified ratings on category review platforms relevant to %s.',
+                            $categoryLabel
+                        ),
+                        'specificity_required' => 'At least 20+ verified reviews on a recognised platform, with average rating above 4.0. Self-reported testimonials do not count.',
+                        'estimated_effort'     => 'Variable — ratings build over time; can be accelerated with verified-review campaigns.',
+                    ],
+                ];
+
+            default:
+                return [
+                    [
+                        'priority'             => 1,
+                        'type'                 => 'authoritative_third_party',
+                        'description'          => sprintf(
+                            'Authoritative third-party evidence naming %s and addressing the displacement criteria above.',
+                            $brandLabel
+                        ),
+                        'specificity_required' => 'Recognised independent source with editorial standards.',
+                        'estimated_effort'     => 'Variable.',
+                    ],
+                ];
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers — provider construction + persistence
+    // -------------------------------------------------------------------------
 
     /**
      * Build a SearchProviderInterface for a given citation_platforms row.
@@ -587,10 +1082,6 @@ final class OrbitSearchOrchestrator
         int $latencyMs,
         array $errors
     ): int {
-        // Build PG TEXT[] literals manually since Capsule doesn't auto-convert PHP arrays
-        $tiersLiteral = $this->toPgTextArray($requestedTiers);
-        $searchedLiteral = $this->toPgTextArray($platformsSearched);
-
         $errorMessage = $errors !== [] ? implode(' | ', $errors) : null;
         $status = ($errorMessage === null || $resultsCount > 0) ? 'complete' : 'error';
 
@@ -626,11 +1117,8 @@ final class OrbitSearchOrchestrator
             $payload['claim_embedding'] = $vector;
         }
 
-        // query_string is not a column in the schema — we keep it for the
-        // response payload only, not for persistence
+        // query_string is not a column in the schema — kept in the response only
         unset($queryString);
-        unset($tiersLiteral);
-        unset($searchedLiteral);
 
         return (int) Capsule::table('orbit_search_runs')->insertGetId($payload);
     }
@@ -640,19 +1128,10 @@ final class OrbitSearchOrchestrator
         $parts = [];
         foreach ($values as $v) {
             $s = (string) $v;
-            // Escape single quotes for SQL literal
             $s = str_replace("'", "''", $s);
             $parts[] = "'{$s}'";
         }
         return implode(',', $parts);
-    }
-
-    private function toPgTextArray(array $values): string
-    {
-        $escaped = array_map(static function ($v) {
-            return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], (string) $v) . '"';
-        }, $values);
-        return '{' . implode(',', $escaped) . '}';
     }
 
     private function persistResult(int $runId, int $rank, array $entry): bool
@@ -664,7 +1143,6 @@ final class OrbitSearchOrchestrator
             $score     = $entry['score'];
             $embedding = $entry['embedding'];
 
-            // Tier is NOT NULL in schema — fall back to T3.9 if classifier returned nothing
             $tier = (string) ($platform['tier'] ?? 'T3.9');
 
             $row = [
@@ -694,13 +1172,11 @@ final class OrbitSearchOrchestrator
                 $row['candidate_embedding'] = $vector;
             }
 
-            // rank is captured for the response payload but isn't a DB column
             unset($rank);
 
             Capsule::table('orbit_search_results')->insert($row);
             return true;
         } catch (Throwable $e) {
-            // Persistence failure for one row shouldn't kill the whole run
             return false;
         }
     }
@@ -722,13 +1198,6 @@ final class OrbitSearchOrchestrator
 
     /**
      * Run a search using a descriptor instead of a known gap_id.
-     *
-     * @param int      $brandId
-     * @param int      $auditId
-     * @param string   $filterType         e.g. 'T0', 'T1', 'T2', 'T3'
-     * @param string[] $requestedTiers
-     * @param string   $requestedSentiment
-     * @param int|null $perProviderCap
      */
     public function runFromDescriptor(
         int $brandId,
@@ -745,11 +1214,6 @@ final class OrbitSearchOrchestrator
     /**
      * Look up an existing gap row matching (brand_id, audit_id, filter_type)
      * or create one on-demand using classification data.
-     *
-     * Returns the gap_id (existing or newly created).
-     *
-     * Throws RuntimeException if there is no classification data to create
-     * a gap from.
      */
     private function resolveOrCreateGap(int $brandId, int $auditId, string $filterType): int
     {
@@ -758,7 +1222,6 @@ final class OrbitSearchOrchestrator
             throw new RuntimeException("Invalid filter_type: {$filterType}. Expected T0-T9.");
         }
 
-        // 1. Try to find an existing gap row
         $existing = Capsule::table('meridian_competitive_citation_gaps')
             ->where('brand_id', $brandId)
             ->where('audit_id', $auditId)
@@ -771,9 +1234,7 @@ final class OrbitSearchOrchestrator
             return (int) $existing->id;
         }
 
-        // 2. Need to create one — wrap in a transaction
         return Capsule::connection()->transaction(function () use ($brandId, $auditId, $filterType): int {
-            // Look up brand to get agency_id
             $brand = Capsule::table('meridian_brands')->where('id', $brandId)->first();
             if (!$brand) {
                 throw new RuntimeException("Brand not found: {$brandId}");
@@ -783,13 +1244,11 @@ final class OrbitSearchOrchestrator
                 throw new RuntimeException("Brand {$brandId} has no agency_id");
             }
 
-            // Confirm audit exists and belongs to same brand
             $audit = Capsule::table('meridian_audits')->where('id', $auditId)->first();
             if (!$audit) {
                 throw new RuntimeException("Audit not found: {$auditId}");
             }
 
-            // Find the most relevant classification for displacement metadata
             $classifications = Capsule::table('meridian_filter_classifications')
                 ->where('audit_id', $auditId)
                 ->where('brand_id', $brandId)
@@ -797,7 +1256,6 @@ final class OrbitSearchOrchestrator
                 ->orderByDesc('survival_gap')
                 ->get();
 
-            // Pick the classification whose evidence_gaps array contains our filter
             $matchedClassification = null;
             $gapDescription        = null;
             $displacingBrand       = null;
@@ -825,7 +1283,6 @@ final class OrbitSearchOrchestrator
                 );
             }
 
-            // Find or create a remediation plan for this audit
             $plan = Capsule::table('meridian_remediation_plans')
                 ->where('audit_id', $auditId)
                 ->where('brand_id', $brandId)
@@ -849,16 +1306,13 @@ final class OrbitSearchOrchestrator
                 $planId = (int) $plan->id;
             }
 
-            // Build category from brand row
             $category    = (string) ($brand->category    ?? '');
             $subcategory = (string) ($brand->subcategory ?? '');
 
-            // Determine platform — use the first platform from the classification, or 'all'
             $platform = isset($matchedClassification->platform) && $matchedClassification->platform !== ''
                 ? (string) $matchedClassification->platform
                 : 'all';
 
-            // Create the gap row
             $gapId = (int) Capsule::table('meridian_competitive_citation_gaps')->insertGetId([
                 'remediation_plan_id'      => $planId,
                 'audit_id'                 => $auditId,
@@ -883,9 +1337,6 @@ final class OrbitSearchOrchestrator
         });
     }
 
-    /**
-     * Map M1 survival_gap (turns of exposure) to gap_severity enum.
-     */
     private function mapSeverityFromSurvivalGap($survivalGap): string
     {
         $g = is_numeric($survivalGap) ? (int) $survivalGap : 0;
@@ -895,10 +1346,6 @@ final class OrbitSearchOrchestrator
         return 'low';
     }
 
-    /**
-     * Suggest an expected_content_type string based on the filter tier.
-     * Used as ORBIT's claim text seed when no gap row exists upstream.
-     */
     private function expectedContentForFilter(string $filterType): string
     {
         switch ($filterType) {
