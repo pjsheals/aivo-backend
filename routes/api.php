@@ -35,6 +35,8 @@ use Aivo\Controllers\MeridianContentIndexerController;
 
 // ── ORBIT controllers (gap-triggered evidence discovery layer) ────
 use Aivo\Orbit\Controllers\OrbitTestController;
+use Aivo\Orbit\Controllers\OrbitController;
+use Aivo\Orbit\Controllers\OrbitAdminController;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -125,6 +127,9 @@ $routes = [
         '/api/meridian/content-sources'        => [MeridianContentIndexerController::class, 'listSources'],
         '/api/meridian/content-items'          => [MeridianContentIndexerController::class, 'listItems'],
         '/api/meridian/content-items/detail'   => [MeridianContentIndexerController::class, 'itemDetail'],
+
+        // ── ORBIT: citation_platforms admin list (superadmin) ────
+        '/api/orbit/admin/citation-platforms'  => [OrbitAdminController::class, 'listPlatforms'],
     ],
 
     'POST' => [
@@ -247,6 +252,12 @@ $routes = [
         '/api/orbit/admin/test-brave'          => [OrbitTestController::class, 'testBrave'],
         '/api/orbit/admin/test-search'         => [OrbitTestController::class, 'testSearch'],
         '/api/orbit/admin/run-search'          => [OrbitTestController::class, 'runSearch'],
+
+        // ── ORBIT: production endpoints (session auth) ───────────
+        '/api/orbit/search'                    => [OrbitController::class, 'search'],
+
+        // ── ORBIT: citation_platforms admin create (superadmin) ──
+        '/api/orbit/admin/citation-platforms'  => [OrbitAdminController::class, 'createPlatform'],
     ],
 ];
 
@@ -256,6 +267,34 @@ $handler = $routes[$method][$uri] ?? null;
 // ── Prefix match for /r/{token} redirect ──────────────────────────
 if ($handler === null && $method === 'GET' && str_starts_with($uri, '/r/')) {
     $handler = [MeridianAttributionController::class, 'redirect'];
+}
+
+// ── ORBIT path-parameter routes (numeric IDs in URL) ──────────────
+if ($handler === null) {
+    // GET /api/orbit/runs/{id}
+    if ($method === 'GET' && preg_match('#^/api/orbit/runs/\d+$#', $uri)) {
+        $handler = [OrbitController::class, 'getRun'];
+    }
+    // GET /api/orbit/admin/citation-platforms/{id}
+    elseif ($method === 'GET' && preg_match('#^/api/orbit/admin/citation-platforms/\d+$#', $uri)) {
+        $handler = [OrbitAdminController::class, 'showPlatform'];
+    }
+    // POST /api/orbit/results/{id}/accept
+    elseif ($method === 'POST' && preg_match('#^/api/orbit/results/\d+/accept$#', $uri)) {
+        $handler = [OrbitController::class, 'acceptResult'];
+    }
+    // POST /api/orbit/results/{id}/reject
+    elseif ($method === 'POST' && preg_match('#^/api/orbit/results/\d+/reject$#', $uri)) {
+        $handler = [OrbitController::class, 'rejectResult'];
+    }
+    // PATCH /api/orbit/admin/citation-platforms/{id}
+    elseif ($method === 'PATCH' && preg_match('#^/api/orbit/admin/citation-platforms/\d+$#', $uri)) {
+        $handler = [OrbitAdminController::class, 'updatePlatform'];
+    }
+    // DELETE /api/orbit/admin/citation-platforms/{id}
+    elseif ($method === 'DELETE' && preg_match('#^/api/orbit/admin/citation-platforms/\d+$#', $uri)) {
+        $handler = [OrbitAdminController::class, 'deletePlatform'];
+    }
 }
 
 if ($handler === null) {
