@@ -39,6 +39,22 @@ final class CandidateScorer
     private const RELEVANCE_AMPLIFIER   = 1.5;
 
     /**
+     * Relevance floor — results below these cosine thresholds get heavy penalties
+     * regardless of tier authority. Without this, a 16% match Crossref result
+     * (T1.2, score_base ~80) outranks a 67% match Brave result (T3.9, score_base ~15).
+     *
+     * Empirically calibrated from the 29 Apr Revitalift Paris run where the claim
+     * text was wrong and produced 16-30% matches across T1 sources. A clean
+     * displacement_criteria-led claim should yield 50%+ matches for relevant
+     * content; below 25% means semantic mismatch that no amount of tier
+     * authority should compensate for.
+     */
+    private const RELEVANCE_FLOOR_HARD  = 0.15;  // below this: 95% penalty
+    private const RELEVANCE_FLOOR_SOFT  = 0.25;  // below this: 80% penalty
+    private const RELEVANCE_PENALTY_HARD = 0.05;
+    private const RELEVANCE_PENALTY_SOFT = 0.20;
+
+    /**
      * Score a candidate against a claim's embedding and the platform metadata.
      *
      * @param CandidateResult     $candidate
@@ -103,17 +119,32 @@ final class CandidateScorer
         $score += ($sectorMatchBonus * $baseTierScore);
         $score -= $sentimentPenalty;
 
+        // 6b. Relevance floor — apply heavy penalty if cosine is too low.
+        // This prevents irrelevant T1 results outscoring relevant T3 results
+        // purely on tier authority. The penalty is multiplicative on the
+        // already-composed score so sentiment_penalty isn't undone.
+        $relevanceFloorPenalty = 1.0;
+        if ($cosine < self::RELEVANCE_FLOOR_HARD) {
+            $relevanceFloorPenalty = self::RELEVANCE_PENALTY_HARD;
+        } elseif ($cosine < self::RELEVANCE_FLOOR_SOFT) {
+            $relevanceFloorPenalty = self::RELEVANCE_PENALTY_SOFT;
+        }
+        if ($relevanceFloorPenalty < 1.0) {
+            $score *= $relevanceFloorPenalty;
+        }
+
         // Floor at zero — negative scores are noise
         $score = max(0.0, $score);
 
         return [
-            'base_tier_score'      => round($baseTierScore, 2),
-            'recency_multiplier'   => round($recencyMultiplier, 3),
-            'relevance_multiplier' => round($relevanceMultiplier, 3),
-            'sector_match_bonus'   => round($sectorMatchBonus, 3),
-            'sentiment_penalty'    => round($sentimentPenalty, 2),
-            'candidate_score'      => round($score, 2),
-            'relevance_cosine'     => round($cosine, 4),
+            'base_tier_score'         => round($baseTierScore, 2),
+            'recency_multiplier'      => round($recencyMultiplier, 3),
+            'relevance_multiplier'    => round($relevanceMultiplier, 3),
+            'sector_match_bonus'      => round($sectorMatchBonus, 3),
+            'sentiment_penalty'       => round($sentimentPenalty, 2),
+            'relevance_floor_penalty' => round($relevanceFloorPenalty, 3),
+            'candidate_score'         => round($score, 2),
+            'relevance_cosine'        => round($cosine, 4),
         ];
     }
 
