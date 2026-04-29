@@ -151,16 +151,34 @@ final class PubMedSearchProvider implements SearchProviderInterface
 
         $publishedAt = null;
         if (!empty($rec['pubdate']) && is_string($rec['pubdate'])) {
-            try {
-                $publishedAt = new DateTimeImmutable($rec['pubdate']);
-            } catch (Throwable) {
-                // PubMed sometimes returns "2024 Mar" or "2024" — try parsing those
-                $year = preg_match('/\b(\d{4})\b/', $rec['pubdate'], $m) ? (int) $m[1] : null;
-                if ($year !== null && $year >= 1900 && $year <= 2100) {
-                    try {
-                        $publishedAt = new DateTimeImmutable("{$year}-01-01T00:00:00Z");
-                    } catch (Throwable) {
-                        // give up gracefully
+            $raw = trim($rec['pubdate']);
+
+            // Bare year ("2006") — DateTimeImmutable parses these as relative-time
+            // and lands on today, so detect and fix manually
+            if (preg_match('/^\d{4}$/', $raw)) {
+                try {
+                    $publishedAt = new DateTimeImmutable("{$raw}-01-01T00:00:00Z");
+                } catch (Throwable) {
+                    // give up gracefully
+                }
+            } else {
+                // Year-month form ("2024 Mar", "2024 Sep")
+                if (preg_match('/^(\d{4})\s+([A-Za-z]+)$/', $raw, $m)) {
+                    $raw = "{$m[1]} {$m[2]} 1";
+                }
+                try {
+                    $publishedAt = new DateTimeImmutable($raw);
+                } catch (Throwable) {
+                    // Final fallback: extract any 4-digit year
+                    if (preg_match('/\b(\d{4})\b/', $raw, $m2)) {
+                        $year = (int) $m2[1];
+                        if ($year >= 1900 && $year <= 2100) {
+                            try {
+                                $publishedAt = new DateTimeImmutable("{$year}-01-01T00:00:00Z");
+                            } catch (Throwable) {
+                                // give up gracefully
+                            }
+                        }
                     }
                 }
             }
