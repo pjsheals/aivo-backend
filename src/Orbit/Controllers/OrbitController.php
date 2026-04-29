@@ -32,44 +32,91 @@ class OrbitController
     /**
      * POST /api/orbit/search
      *
-     * Body:
-     * {
-     *   "gap_id":              123,
-     *   "requested_tiers":     ["T1.*","T2.*"],   // optional
-     *   "requested_sentiment": "positive",         // optional
-     *   "per_provider_cap":    3                   // optional, 1-10
-     * }
+     * Accepts either:
+     *   { "gap_id": 123, ... }
+     * OR a descriptor:
+     *   { "brand_id": 1, "audit_id": 26, "filter_type": "T1", ... }
+     *
+     * Common optional fields:
+     *   "requested_tiers":     ["T1.*","T2.*"]
+     *   "requested_sentiment": "positive"
+     *   "per_provider_cap":    3
      *
      * Returns the run summary with persisted run_id + ranked results.
-     * 403 if the gap doesn't belong to the caller's agency.
+     * 403 if the gap/brand doesn't belong to the caller's agency.
      */
     public function search(): void
     {
         $auth = MeridianAuth::require('analyst');
 
-        $body  = $this->readJsonBody();
-        $gapId = (int) ($body['gap_id'] ?? 0);
-        if ($gapId <= 0) {
-            http_response_code(400);
-            json_response(['error' => 'Missing or invalid gap_id (must be positive integer).']);
-            return;
+        $body = $this->readJsonBody();
+
+        // Either gap_id OR descriptor must be supplied
+        $gapId      = isset($body['gap_id']) ? (int) $body['gap_id'] : 0;
+        $brandId    = isset($body['brand_id']) ? (int) $body['brand_id'] : 0;
+        $auditId    = isset($body['audit_id']) ? (int) $body['audit_id'] : 0;
+        $filterType = isset($body['filter_type']) ? strtoupper(trim((string) $body['filter_type'])) : '';
+
+        $usingDescriptor = ($gapId <= 0);
+
+        if ($usingDescriptor) {
+            if ($brandId <= 0 || $auditId <= 0 || $filterType === '') {
+                http_response_code(400);
+                json_response([
+                    'error' => 'Provide either gap_id, OR all three of: brand_id, audit_id, filter_type.',
+                ]);
+                return;
+            }
+            if (!preg_match('/^T[0-9]$/', $filterType)) {
+                http_response_code(400);
+                json_response(['error' => "filter_type must be T0-T9 (got '{$filterType}')."]);
+                return;
+            }
+
+            // Tenant isolation — verify the brand belongs to this agency
+            $brand = Capsule::table('meridian_brands')
+                ->where('id', $brandId)
+                ->whereNull('deleted_at')
+                ->first();
+            if (!$brand) {
+                http_response_code(404);
+                json_response(['error' => "Brand {$brandId} not found."]);
+                return;
+            }
+            if ((int) ($brand->agency_id ?? 0) !== $auth->agency_id && !$auth->is_superadmin) {
+                http_response_code(403);
+                json_response(['error' => 'You do not have access to this brand.']);
+                return;
+            }
+
+            // Confirm the audit belongs to the same brand (defence in depth)
+            $audit = Capsule::table('meridian_audits')
+                ->where('id', $auditId)
+                ->where('brand_id', $brandId)
+                ->first();
+            if (!$audit) {
+                http_response_code(404);
+                json_response(['error' => "Audit {$auditId} not found for brand {$brandId}."]);
+                return;
+            }
+        } else {
+            // gap_id path — verify it exists and belongs to this agency
+            $gap = Capsule::table('meridian_competitive_citation_gaps')
+                ->where('id', $gapId)
+                ->first();
+            if (!$gap) {
+                http_response_code(404);
+                json_response(['error' => "Gap {$gapId} not found."]);
+                return;
+            }
+            if ((int) ($gap->agency_id ?? 0) !== $auth->agency_id && !$auth->is_superadmin) {
+                http_response_code(403);
+                json_response(['error' => 'You do not have access to this gap.']);
+                return;
+            }
         }
 
-        // Tenant isolation — verify the gap belongs to this agency
-        $gap = Capsule::table('meridian_competitive_citation_gaps')
-            ->where('id', $gapId)
-            ->first();
-        if (!$gap) {
-            http_response_code(404);
-            json_response(['error' => "Gap {$gapId} not found."]);
-            return;
-        }
-        if ((int) ($gap->agency_id ?? 0) !== $auth->agency_id && !$auth->is_superadmin) {
-            http_response_code(403);
-            json_response(['error' => 'You do not have access to this gap.']);
-            return;
-        }
-
+        // Common optional params
         $requestedTiers = [];
         if (!empty($body['requested_tiers']) && is_array($body['requested_tiers'])) {
             $requestedTiers = array_values(array_filter(
@@ -98,7 +145,18 @@ class OrbitController
         }
 
         try {
-            $result = $orchestrator->run($gapId, $requestedTiers, $sentiment, $perCap);
+            if ($usingDescriptor) {
+                $result = $orchestrator->runFromDescriptor(
+                    $brandId,
+                    $auditId,
+                    $filterType,
+                    $requestedTiers,
+                    $sentiment,
+                    $perCap
+                );
+            } else {
+                $result = $orchestrator->run($gapId, $requestedTiers, $sentiment, $perCap);
+            }
 
             // Stamp the run with the user who triggered it so we can audit
             if (!empty($result['run_id'])) {
