@@ -246,6 +246,7 @@ $routes = [
         // ── ORBIT: gap-triggered evidence discovery (admin/test) ──
         '/api/orbit/admin/test-brave'          => [OrbitTestController::class, 'testBrave'],
         '/api/orbit/admin/test-search'         => [OrbitTestController::class, 'testSearch'],
+        '/api/orbit/admin/run-search'          => [OrbitTestController::class, 'runSearch'],
     ],
 ];
 
