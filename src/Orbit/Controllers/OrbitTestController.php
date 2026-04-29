@@ -15,65 +15,110 @@ use Aivo\Orbit\Providers\PubMedSearchProvider;
 use Aivo\Orbit\Providers\WikidataSearchProvider;
 use Aivo\Orbit\Providers\WikipediaSearchProvider;
 use Aivo\Orbit\Providers\ZenodoSearchProvider;
+use Aivo\Orbit\Services\CandidateScorer;
+use Aivo\Orbit\Services\CitationPlatformResolver;
+use Aivo\Orbit\Services\EmbeddingService;
+use Aivo\Orbit\Services\OrbitSearchOrchestrator;
 use InvalidArgumentException;
+use RuntimeException;
 use Throwable;
 
 /**
- * Admin/test endpoints for ORBIT, used during build stages to verify
- * each search provider before it gets wired into the orchestrator.
+ * Admin/test endpoints for ORBIT.
  *
- * Auth: X-Meridian-Secret header (matches existing super-admin pattern).
+ * Auth: X-Meridian-Secret header.
  *
  * Routes:
- *   POST /api/orbit/admin/test-brave   (kept for back-compat with Stage 3)
- *   POST /api/orbit/admin/test-search  (generic — accepts "provider" parameter)
- *
- * Supported providers (Stage 4 complete):
- *   brave, wikipedia, wikidata, github,
- *   crossref, openalex, pubmed, arxiv, zenodo
+ *   POST /api/orbit/admin/test-brave   — Stage 3 single-provider test
+ *   POST /api/orbit/admin/test-search  — Stage 4 generic single-provider test
+ *   POST /api/orbit/admin/run-search   — Stage 5 full orchestrator pipeline
  */
 class OrbitTestController
 {
-    /**
-     * POST /api/orbit/admin/test-brave
-     *
-     * Stage 3 endpoint — kept so existing test scripts keep working.
-     */
     public function testBrave(): void
     {
-        if (!$this->authorise()) {
-            return;
-        }
+        if (!$this->authorise()) return;
         $body = $this->readJsonBody();
         $body['provider'] = 'brave';
         $this->dispatch($body);
     }
 
+    public function testSearch(): void
+    {
+        if (!$this->authorise()) return;
+        $this->dispatch($this->readJsonBody());
+    }
+
     /**
-     * POST /api/orbit/admin/test-search
-     *
-     * Headers:
-     *   X-Meridian-Secret: <MERIDIAN_INTERNAL_SECRET>
-     *   Content-Type:      application/json
+     * POST /api/orbit/admin/run-search
      *
      * Body:
      * {
-     *   "provider": "brave"|"wikipedia"|"wikidata"|"github"|"crossref"|"openalex"|"pubmed"|"arxiv"|"zenodo",
-     *   "query":    "...",
-     *   "options":  { ... provider-specific ... }
+     *   "gap_id":              123,
+     *   "requested_tiers":     ["T1.*","T2.*"],   // optional, defaults to all
+     *   "requested_sentiment": "positive",         // optional
+     *   "per_provider_cap":    5                   // optional, 1-10
      * }
+     *
+     * Returns the run summary with persisted run_id + ranked results.
      */
-    public function testSearch(): void
+    public function runSearch(): void
     {
-        if (!$this->authorise()) {
+        if (!$this->authorise()) return;
+
+        $body = $this->readJsonBody();
+        $gapId = (int) ($body['gap_id'] ?? 0);
+        if ($gapId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'Missing or invalid gap_id (must be positive integer).']);
             return;
         }
-        $body = $this->readJsonBody();
-        $this->dispatch($body);
+
+        $requestedTiers = [];
+        if (!empty($body['requested_tiers']) && is_array($body['requested_tiers'])) {
+            $requestedTiers = array_values(array_filter(
+                array_map(static fn ($t) => trim((string) $t), $body['requested_tiers']),
+                static fn ($t) => $t !== ''
+            ));
+        }
+
+        $sentiment = (string) ($body['requested_sentiment'] ?? 'positive');
+        if (!in_array($sentiment, ['positive', 'neutral', 'any'], true)) {
+            http_response_code(400);
+            json_response(['error' => "Invalid requested_sentiment. Use 'positive'|'neutral'|'any'."]);
+            return;
+        }
+
+        $perCap = isset($body['per_provider_cap'])
+            ? max(1, min(10, (int) $body['per_provider_cap']))
+            : null;
+
+        try {
+            $orchestrator = $this->buildOrchestrator();
+        } catch (InvalidArgumentException $e) {
+            http_response_code(500);
+            json_response(['error' => $e->getMessage()]);
+            return;
+        }
+
+        try {
+            $result = $orchestrator->run($gapId, $requestedTiers, $sentiment, $perCap);
+            json_response(['success' => true] + $result);
+        } catch (RuntimeException $e) {
+            http_response_code(404);
+            json_response(['error' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            json_response([
+                'error'   => 'Orchestrator failure',
+                'message' => $e->getMessage(),
+                'trace'   => $e->getTraceAsString(),
+            ]);
+        }
     }
 
     // -------------------------------------------------------------------------
-    // Internal dispatch
+    // Stage 4 generic single-provider dispatch
     // -------------------------------------------------------------------------
 
     private function dispatch(array $body): void
@@ -92,10 +137,8 @@ class OrbitTestController
             return;
         }
 
-        // Accept options either at the top level (legacy: site/count/freshness flat)
-        // or nested under 'options'
         $options = is_array($body['options'] ?? null) ? $body['options'] : [];
-        foreach (['site', 'count', 'freshness', 'country', 'language', 'type', 'sort', 'scope'] as $passthrough) {
+        foreach (['site','count','freshness','country','language','type','sort','scope'] as $passthrough) {
             if (isset($body[$passthrough]) && !isset($options[$passthrough])) {
                 $options[$passthrough] = $body[$passthrough];
             }
@@ -109,10 +152,7 @@ class OrbitTestController
             return;
         } catch (Throwable $e) {
             http_response_code(500);
-            json_response([
-                'error'   => 'Provider construction failed',
-                'message' => $e->getMessage(),
-            ]);
+            json_response(['error' => 'Provider construction failed', 'message' => $e->getMessage()]);
             return;
         }
 
@@ -132,18 +172,10 @@ class OrbitTestController
             ]);
         } catch (SearchProviderException $e) {
             http_response_code(502);
-            json_response([
-                'error'    => 'Search provider error',
-                'provider' => $provider->getName(),
-                'message'  => $e->getMessage(),
-            ]);
+            json_response(['error' => 'Search provider error', 'provider' => $provider->getName(), 'message' => $e->getMessage()]);
         } catch (Throwable $e) {
             http_response_code(500);
-            json_response([
-                'error'    => 'Internal error',
-                'provider' => $provider->getName(),
-                'message'  => $e->getMessage(),
-            ]);
+            json_response(['error' => 'Internal error', 'provider' => $provider->getName(), 'message' => $e->getMessage()]);
         }
     }
 
@@ -156,37 +188,53 @@ class OrbitTestController
                     throw new InvalidArgumentException('BRAVE_SEARCH_API_KEY is not set in Railway.');
                 }
                 return new BraveSearchProvider($key);
-
             case 'wikipedia':
                 return new WikipediaSearchProvider();
-
             case 'wikidata':
                 return new WikidataSearchProvider();
-
             case 'github':
                 $token = (string) env('GITHUB_TOKEN', '');
                 return new GitHubSearchProvider($token !== '' ? $token : null);
-
             case 'crossref':
                 return new CrossrefSearchProvider();
-
             case 'openalex':
                 return new OpenAlexSearchProvider();
-
             case 'pubmed':
                 return new PubMedSearchProvider();
-
             case 'arxiv':
                 return new ArxivSearchProvider();
-
             case 'zenodo':
                 return new ZenodoSearchProvider();
-
             default:
                 throw new InvalidArgumentException(
                     "Unknown provider '{$name}'. Valid: brave, wikipedia, wikidata, github, crossref, openalex, pubmed, arxiv, zenodo."
                 );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Stage 5 orchestrator construction
+    // -------------------------------------------------------------------------
+
+    private function buildOrchestrator(): OrbitSearchOrchestrator
+    {
+        $openaiKey = (string) env('OPENAI_API_KEY', '');
+        if ($openaiKey === '') {
+            throw new InvalidArgumentException('OPENAI_API_KEY is not set in Railway.');
+        }
+        $braveKey = (string) env('BRAVE_SEARCH_API_KEY', '');
+        if ($braveKey === '') {
+            throw new InvalidArgumentException('BRAVE_SEARCH_API_KEY is not set in Railway.');
+        }
+        $githubToken = (string) env('GITHUB_TOKEN', '');
+
+        return new OrbitSearchOrchestrator(
+            embedder:    new EmbeddingService($openaiKey),
+            resolver:    new CitationPlatformResolver(),
+            scorer:      new CandidateScorer(),
+            braveApiKey: $braveKey,
+            githubToken: $githubToken !== '' ? $githubToken : null
+        );
     }
 
     // -------------------------------------------------------------------------
