@@ -29,7 +29,7 @@ use Throwable;
  */
 final class ArxivSearchProvider implements SearchProviderInterface
 {
-    private const ENDPOINT        = 'http://export.arxiv.org/api/query';
+    private const ENDPOINT        = 'https://export.arxiv.org/api/query';
     private const DEFAULT_COUNT   = 10;
     private const MAX_COUNT       = 50;
     private const TIMEOUT_SECONDS = 15;
