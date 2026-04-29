@@ -106,8 +106,48 @@ final class OrbitSearchOrchestrator
             strtolower($brandSubCat),
         ]));
 
-        // 2. Build claim text
-        $claimText = $this->buildClaimText($gap, $brandName);
+        // Load the matching classification row to recover displacement_criteria.
+        // This is the actual question the AI asked at T4 — the most semantically
+        // important field for relevance matching. It's NOT stored on the gap row,
+        // only on meridian_filter_classifications. If we can't find it, we'll
+        // fall back to the gap row's intervention_required field.
+        $displacementCriteria = (string) ($gap['displacement_criteria'] ?? '');
+        if ($displacementCriteria === '') {
+            $auditId = (int) ($gap['audit_id'] ?? 0);
+            $citationTier = (string) ($gap['citation_tier'] ?? '');
+            if ($auditId > 0 && $brandId > 0 && $citationTier !== '') {
+                $classifications = Capsule::table('meridian_filter_classifications')
+                    ->where('audit_id', $auditId)
+                    ->where('brand_id', $brandId)
+                    ->orderByDesc('confidence_score')
+                    ->orderByDesc('survival_gap')
+                    ->limit(20)
+                    ->get();
+
+                foreach ($classifications as $c) {
+                    // Confirm this classification covers our citation_tier
+                    $gapsJson = json_decode($c->evidence_gaps ?? '[]', true);
+                    if (!is_array($gapsJson)) continue;
+
+                    $matchesFilter = false;
+                    foreach ($gapsJson as $g) {
+                        if (isset($g['filter']) && strtoupper((string) $g['filter']) === strtoupper($citationTier)) {
+                            $matchesFilter = true;
+                            break;
+                        }
+                    }
+
+                    if ($matchesFilter && !empty($c->displacement_criteria)) {
+                        $displacementCriteria = (string) $c->displacement_criteria;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. Build claim text and query string from gap + recovered displacement_criteria
+        $claimText   = $this->buildClaimText($gap, $brandName, $displacementCriteria);
+        $queryString = $this->buildQueryString($gap, $brandName, $displacementCriteria);
 
         // 3. Embed the claim
         $claimEmbedding = [];
@@ -141,9 +181,8 @@ final class OrbitSearchOrchestrator
             'provider' => new BraveSearchProvider($this->braveApiKey),
         ];
 
-        // 5. Build query string and fan out
+        // 5. Fan out to providers with the prepared query string
         $perCap = max(1, min(10, (int) ($perProviderCap ?? self::PER_PROVIDER_RESULT_CAP)));
-        $queryString = $this->buildQueryString($gap, $brandName);
 
         // Each candidate is wrapped with its source platform row + provider name
         $allCandidates = []; // list of [candidate, platform, provider_name]
@@ -316,47 +355,193 @@ final class OrbitSearchOrchestrator
     // Helpers
     // -------------------------------------------------------------------------
 
-    private function buildClaimText(array $gap, string $brandName): string
+    /**
+     * Build the claim text used for embedding (semantic relevance comparison).
+     *
+     * The claim must be a POSITIVE statement of what evidence we want to find,
+     * NOT a negative description of what's missing. Embedding a negative
+     * (e.g. "lacks peer-reviewed evidence") makes ORBIT match papers that are
+     * literally about "lacking peer-reviewed publications" — which is what
+     * happened in the Revitalift Paris run that triggered this fix.
+     *
+     * Construction priority:
+     *   1. displacement_criteria — the actual question the AI asked at T4.
+     *      This is the most semantically valuable text and dominates the claim.
+     *   2. brand + category — topical anchors so embeddings stay on-domain.
+     *   3. displacing_brand — used as a positive comparator ("comparable to X")
+     *      not as a negative ("displaced by X"), so the embedding stays in the
+     *      same semantic neighbourhood as the displacing brand's evidence.
+     *
+     * What we deliberately EXCLUDE:
+     *   - intervention_required / gap_description (often phrased as a negative)
+     *   - expected_content_type (generic per-tier boilerplate that overwhelms
+     *     the embedding with words like "peer-reviewed publications")
+     */
+    private function buildClaimText(array $gap, string $brandName, string $displacementCriteria = ''): string
     {
-        // Compose a short, semantically rich claim from the gap fields.
-        // The claim is what we'll embed for relevance comparison.
         $parts = [];
 
-        if (!empty($gap['claim'])) {
+        // displacement_criteria is the lead — the actual question being asked.
+        // Strip a trailing question mark so embedding sees a statement-like form.
+        $criteria = trim($displacementCriteria);
+        if ($criteria !== '') {
+            $criteria = rtrim($criteria, " \t\n\r\0\x0B?");
+            $parts[] = "Evidence required: " . $criteria . '.';
+        } elseif (!empty($gap['claim'])) {
+            // Legacy fallback for callers that pre-populate gap['claim']
             $parts[] = (string) $gap['claim'];
         }
-        if (!empty($gap['intervention_required'])) {
-            $parts[] = (string) $gap['intervention_required'];
-        }
-        if (!empty($gap['expected_content_type'])) {
-            $parts[] = "Looking for: " . (string) $gap['expected_content_type'];
-        }
+
+        // Topical anchors — brand + category keep the embedding on-domain
+        $brandLine = '';
         if ($brandName !== '') {
-            $parts[] = "Brand: {$brandName}";
-        }
-        if (!empty($gap['displacing_brand'])) {
-            $parts[] = "Displacing brand: " . (string) $gap['displacing_brand'];
-        }
-        if (!empty($gap['category'])) {
-            $parts[] = "Category: " . (string) $gap['category'];
+            $brandLine = "Brand: {$brandName}";
+            if (!empty($gap['category'])) {
+                $brandLine .= " (" . (string) $gap['category'];
+                if (!empty($gap['subcategory'])) {
+                    $brandLine .= " / " . (string) $gap['subcategory'];
+                }
+                $brandLine .= ")";
+            }
+            $parts[] = $brandLine;
         }
 
-        return implode("\n", array_filter($parts));
+        // Positive comparator — find evidence "comparable to" what supports
+        // the displacing brand. This pulls the embedding into the same
+        // semantic space as evidence the displacing brand HAS.
+        if (!empty($gap['displacing_brand'])) {
+            $parts[] = "Looking for evidence comparable to that supporting "
+                    . (string) $gap['displacing_brand'] . ".";
+        }
+
+        // If displacement_criteria was empty AND we have no fallback claim,
+        // fall back gracefully on intervention_required so we never embed
+        // an empty string. Strip any leading "No "/"Lacks "/"Missing " to
+        // avoid feeding negation back in.
+        if ($criteria === '' && empty($gap['claim']) && !empty($gap['intervention_required'])) {
+            $iv = trim((string) $gap['intervention_required']);
+            $iv = preg_replace('/^(No|Lacks|Lack of|Missing|Insufficient)\s+/i', '', $iv) ?? $iv;
+            if ($iv !== '') {
+                $parts[] = "Need evidence on: " . $iv;
+            }
+        }
+
+        return implode(' ', array_filter($parts));
     }
 
-    private function buildQueryString(array $gap, string $brandName): string
+    /**
+     * Build the keyword query string sent to provider search APIs.
+     *
+     * Search APIs (PubMed, Crossref, Brave, etc.) want concise topical keywords,
+     * not long natural-language statements. We extract content nouns from the
+     * displacement_criteria, then prepend brand + category as anchors.
+     *
+     * Examples:
+     *   displacement_criteria = "Which brand has the most recent, retrievable
+     *                            clinical data demonstrating specific measurable
+     *                            results for hyaluronic acid anti-aging benefits?"
+     *   brand = "Revitalift Paris"  category = "Beauty & Skincare"
+     *   →  query = "Revitalift Paris Beauty Skincare hyaluronic acid anti-aging
+     *              clinical data measurable results"
+     *
+     *   This is what PubMed/Crossref actually want to see.
+     */
+    private function buildQueryString(array $gap, string $brandName, string $displacementCriteria = ''): string
     {
-        // Free-text search query — short and keyword-dense.
-        // Search APIs work better with brand + category than with prose claims.
-        $bits = array_filter([
-            $brandName,
-            (string) ($gap['category'] ?? ''),
-            (string) ($gap['subcategory'] ?? ''),
-            (string) ($gap['expected_content_type'] ?? ''),
-        ]);
-        $query = implode(' ', $bits);
-        // Keep it short — most search APIs prefer ≤6 tokens
-        return mb_substr(trim($query), 0, 200);
+        $bits = [];
+
+        // Brand and category go FIRST as topical anchors — search APIs weight
+        // earlier tokens more heavily. Strip punctuation so they don't tokenise
+        // into useless fragments.
+        if ($brandName !== '') {
+            $bits[] = $this->cleanForQuery($brandName);
+        }
+        if (!empty($gap['category'])) {
+            $bits[] = $this->cleanForQuery((string) $gap['category']);
+        }
+        if (!empty($gap['subcategory'])) {
+            $bits[] = $this->cleanForQuery((string) $gap['subcategory']);
+        }
+
+        // Extract content keywords from displacement_criteria
+        $criteria = trim($displacementCriteria);
+        if ($criteria === '' && !empty($gap['intervention_required'])) {
+            $criteria = (string) $gap['intervention_required'];
+        }
+        if ($criteria !== '') {
+            $bits[] = $this->extractContentKeywords($criteria);
+        }
+
+        $query = trim(preg_replace('/\s+/', ' ', implode(' ', array_filter($bits))) ?? '');
+
+        // Truncate at ~200 chars — most search APIs prefer shorter queries
+        return mb_substr($query, 0, 200);
+    }
+
+    /**
+     * Strip parens, quotes, and leading articles for cleaner query tokens.
+     */
+    private function cleanForQuery(string $s): string
+    {
+        $s = preg_replace('/[\(\)\[\]"\'`]+/', ' ', $s) ?? $s;
+        $s = preg_replace('/^\s*(the|a|an)\s+/i', '', $s) ?? $s;
+        return trim(preg_replace('/\s+/', ' ', $s) ?? $s);
+    }
+
+    /**
+     * Extract content keywords from a natural-language sentence.
+     *
+     * Strategy: drop stopwords, drop punctuation, drop very short words,
+     * keep the rest in original order. Cap at 12 keywords to keep search
+     * APIs happy. This is a pragmatic heuristic — not a parser. If quality
+     * proves insufficient, upgrade to OpenAI keyword extraction (one extra
+     * embedding call per search).
+     */
+    private function extractContentKeywords(string $text): string
+    {
+        // Stopwords list — meta-words that match too generically across a corpus.
+        // Specifically excludes "peer-reviewed", "clinical", "evidence" etc. which
+        // are content-bearing in academic search contexts.
+        static $stopwords = [
+            'a','an','and','are','as','at','be','been','being','but','by','can','do',
+            'does','did','for','from','had','has','have','having','how','if','in',
+            'into','is','it','its','of','on','or','our','out','over','than','that',
+            'the','their','these','they','this','those','to','was','were','what',
+            'when','where','which','who','whom','why','will','with','would','you',
+            'your','my','i','we','us','me','him','her','he','she',
+            // Verbs that add no semantic weight
+            'demonstrate','demonstrating','show','showing','provide','providing',
+            'find','finding','need','needs','needed','want','wants','wanted',
+            'use','used','using','make','making','made','take','taken','taking',
+            // Generic nouns that don't help focus the query
+            'thing','things','way','ways','time','times','case','cases','example',
+            'examples','specific','specifically','recent','retrievable','most',
+            'comparable','comparison','comparing','versus','vs',
+            // Question/meta words
+            'brand','brands',
+        ];
+
+        // Lowercase, strip punctuation except hyphen (preserve "anti-aging")
+        $clean = mb_strtolower($text);
+        $clean = preg_replace('/[^\p{L}\p{N}\-\s]+/u', ' ', $clean) ?? '';
+        $clean = preg_replace('/\s+/', ' ', $clean) ?? '';
+        $tokens = explode(' ', trim($clean));
+
+        $kept = [];
+        $seen = [];
+        foreach ($tokens as $tok) {
+            $tok = trim($tok, "- \t\n\r\0\x0B");
+            if ($tok === '') continue;
+            if (mb_strlen($tok) < 3) continue;
+            if (in_array($tok, $stopwords, true)) continue;
+            // Dedupe — same word twice in a query just wastes tokens
+            if (isset($seen[$tok])) continue;
+            $seen[$tok] = true;
+            $kept[] = $tok;
+            if (count($kept) >= 12) break;
+        }
+
+        return implode(' ', $kept);
     }
 
     /**
