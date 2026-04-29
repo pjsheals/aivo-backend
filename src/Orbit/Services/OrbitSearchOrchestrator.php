@@ -519,4 +519,214 @@ final class OrbitSearchOrchestrator
             return false;
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Descriptor-based entry point — for frontend use where the caller has
+    // brand_id + audit_id + filter_type but does not know the gap_id.
+    //
+    // If a meridian_competitive_citation_gaps row already exists matching
+    // (brand_id, audit_id, citation_tier=filter), use it.
+    //
+    // Otherwise create one on-demand, drawing displacement metadata from the
+    // most recent meridian_filter_classifications row for that brand/audit/
+    // filter. A remediation_plan row is also created if no plan exists yet
+    // for this audit (FK requirement).
+    //
+    // Wrapped in a transaction so partial failures don't leave orphan rows.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Run a search using a descriptor instead of a known gap_id.
+     *
+     * @param int      $brandId
+     * @param int      $auditId
+     * @param string   $filterType         e.g. 'T0', 'T1', 'T2', 'T3'
+     * @param string[] $requestedTiers
+     * @param string   $requestedSentiment
+     * @param int|null $perProviderCap
+     */
+    public function runFromDescriptor(
+        int $brandId,
+        int $auditId,
+        string $filterType,
+        array $requestedTiers = [],
+        string $requestedSentiment = 'positive',
+        ?int $perProviderCap = null
+    ): array {
+        $gapId = $this->resolveOrCreateGap($brandId, $auditId, $filterType);
+        return $this->run($gapId, $requestedTiers, $requestedSentiment, $perProviderCap);
+    }
+
+    /**
+     * Look up an existing gap row matching (brand_id, audit_id, filter_type)
+     * or create one on-demand using classification data.
+     *
+     * Returns the gap_id (existing or newly created).
+     *
+     * Throws RuntimeException if there is no classification data to create
+     * a gap from.
+     */
+    private function resolveOrCreateGap(int $brandId, int $auditId, string $filterType): int
+    {
+        $filterType = strtoupper(trim($filterType));
+        if (!preg_match('/^T[0-9]$/', $filterType)) {
+            throw new RuntimeException("Invalid filter_type: {$filterType}. Expected T0-T9.");
+        }
+
+        // 1. Try to find an existing gap row
+        $existing = Capsule::table('meridian_competitive_citation_gaps')
+            ->where('brand_id', $brandId)
+            ->where('audit_id', $auditId)
+            ->where('citation_tier', $filterType)
+            ->orderByDesc('gap_severity')
+            ->orderBy('id')
+            ->first();
+
+        if ($existing) {
+            return (int) $existing->id;
+        }
+
+        // 2. Need to create one — wrap in a transaction
+        return Capsule::connection()->transaction(function () use ($brandId, $auditId, $filterType): int {
+            // Look up brand to get agency_id
+            $brand = Capsule::table('meridian_brands')->where('id', $brandId)->first();
+            if (!$brand) {
+                throw new RuntimeException("Brand not found: {$brandId}");
+            }
+            $agencyId = (int) ($brand->agency_id ?? 0);
+            if ($agencyId <= 0) {
+                throw new RuntimeException("Brand {$brandId} has no agency_id");
+            }
+
+            // Confirm audit exists and belongs to same brand
+            $audit = Capsule::table('meridian_audits')->where('id', $auditId)->first();
+            if (!$audit) {
+                throw new RuntimeException("Audit not found: {$auditId}");
+            }
+
+            // Find the most relevant classification for displacement metadata
+            $classifications = Capsule::table('meridian_filter_classifications')
+                ->where('audit_id', $auditId)
+                ->where('brand_id', $brandId)
+                ->orderByDesc('confidence_score')
+                ->orderByDesc('survival_gap')
+                ->get();
+
+            // Pick the classification whose evidence_gaps array contains our filter
+            $matchedClassification = null;
+            $gapDescription        = null;
+            $displacingBrand       = null;
+            $displacementCriteria  = null;
+
+            foreach ($classifications as $c) {
+                $gapsJson = json_decode($c->evidence_gaps ?? '[]', true);
+                if (!is_array($gapsJson)) continue;
+
+                foreach ($gapsJson as $g) {
+                    if (isset($g['filter']) && strtoupper((string) $g['filter']) === $filterType) {
+                        $matchedClassification = $c;
+                        $gapDescription        = (string) ($g['gap'] ?? '');
+                        $displacingBrand       = $c->t4_winner ?? null;
+                        $displacementCriteria  = $c->displacement_criteria ?? null;
+                        break 2;
+                    }
+                }
+            }
+
+            if (!$matchedClassification) {
+                throw new RuntimeException(
+                    "No classification data found for filter {$filterType} on brand {$brandId}, audit {$auditId}. "
+                    . "Run M1 classification first."
+                );
+            }
+
+            // Find or create a remediation plan for this audit
+            $plan = Capsule::table('meridian_remediation_plans')
+                ->where('audit_id', $auditId)
+                ->where('brand_id', $brandId)
+                ->orderBy('id')
+                ->first();
+
+            if (!$plan) {
+                $planId = (int) Capsule::table('meridian_remediation_plans')->insertGetId([
+                    'audit_id'        => $auditId,
+                    'agency_id'       => $agencyId,
+                    'brand_id'        => $brandId,
+                    'brief_text'      => 'Auto-created by ORBIT for evidence discovery.',
+                    'status'          => 'draft',
+                    'total_items'     => 0,
+                    'items_completed' => 0,
+                    'completion_rate' => 0,
+                    'created_at'      => Capsule::raw('NOW()'),
+                    'updated_at'      => Capsule::raw('NOW()'),
+                ]);
+            } else {
+                $planId = (int) $plan->id;
+            }
+
+            // Build category from brand row
+            $category    = (string) ($brand->category    ?? '');
+            $subcategory = (string) ($brand->subcategory ?? '');
+
+            // Determine platform — use the first platform from the classification, or 'all'
+            $platform = isset($matchedClassification->platform) && $matchedClassification->platform !== ''
+                ? (string) $matchedClassification->platform
+                : 'all';
+
+            // Create the gap row
+            $gapId = (int) Capsule::table('meridian_competitive_citation_gaps')->insertGetId([
+                'remediation_plan_id'      => $planId,
+                'audit_id'                 => $auditId,
+                'agency_id'                => $agencyId,
+                'brand_id'                 => $brandId,
+                'platform'                 => $platform,
+                'source_type'              => $matchedClassification->probe_type ?? 'decision_stage',
+                'citation_tier'            => $filterType,
+                'gap_severity'             => $this->mapSeverityFromSurvivalGap($matchedClassification->survival_gap ?? null),
+                'displacing_brand'         => $displacingBrand,
+                'brand_currently_present'  => false,
+                'intervention_required'    => $gapDescription,
+                'expected_content_type'    => $this->expectedContentForFilter($filterType),
+                'category'                 => $category !== '' ? $category : 'Uncategorised',
+                'subcategory'              => $subcategory !== '' ? $subcategory : null,
+                'probe_mode'               => 'auto',
+                'created_at'               => Capsule::raw('NOW()'),
+                'updated_at'               => Capsule::raw('NOW()'),
+            ]);
+
+            return $gapId;
+        });
+    }
+
+    /**
+     * Map M1 survival_gap (turns of exposure) to gap_severity enum.
+     */
+    private function mapSeverityFromSurvivalGap($survivalGap): string
+    {
+        $g = is_numeric($survivalGap) ? (int) $survivalGap : 0;
+        if ($g >= 5) return 'critical';
+        if ($g >= 3) return 'high';
+        if ($g >= 1) return 'moderate';
+        return 'low';
+    }
+
+    /**
+     * Suggest an expected_content_type string based on the filter tier.
+     * Used as ORBIT's claim text seed when no gap row exists upstream.
+     */
+    private function expectedContentForFilter(string $filterType): string
+    {
+        switch ($filterType) {
+            case 'T0':
+                return 'Wikipedia/Wikidata anchor and authoritative directory listings';
+            case 'T1':
+                return 'peer-reviewed publications, regulatory approvals, formal independent studies';
+            case 'T2':
+                return 'expert endorsements, third-party audits, analyst reports, government data';
+            case 'T3':
+                return 'press coverage, review platforms, case studies, expert videos, market reports';
+            default:
+                return 'authoritative third-party evidence';
+        }
+    }
 }
