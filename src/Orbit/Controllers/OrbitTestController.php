@@ -6,10 +6,15 @@ namespace Aivo\Orbit\Controllers;
 
 use Aivo\Orbit\Contracts\SearchProviderInterface;
 use Aivo\Orbit\Exceptions\SearchProviderException;
+use Aivo\Orbit\Providers\ArxivSearchProvider;
 use Aivo\Orbit\Providers\BraveSearchProvider;
+use Aivo\Orbit\Providers\CrossrefSearchProvider;
 use Aivo\Orbit\Providers\GitHubSearchProvider;
+use Aivo\Orbit\Providers\OpenAlexSearchProvider;
+use Aivo\Orbit\Providers\PubMedSearchProvider;
 use Aivo\Orbit\Providers\WikidataSearchProvider;
 use Aivo\Orbit\Providers\WikipediaSearchProvider;
+use Aivo\Orbit\Providers\ZenodoSearchProvider;
 use InvalidArgumentException;
 use Throwable;
 
@@ -22,6 +27,10 @@ use Throwable;
  * Routes:
  *   POST /api/orbit/admin/test-brave   (kept for back-compat with Stage 3)
  *   POST /api/orbit/admin/test-search  (generic — accepts "provider" parameter)
+ *
+ * Supported providers (Stage 4 complete):
+ *   brave, wikipedia, wikidata, github,
+ *   crossref, openalex, pubmed, arxiv, zenodo
  */
 class OrbitTestController
 {
@@ -29,7 +38,6 @@ class OrbitTestController
      * POST /api/orbit/admin/test-brave
      *
      * Stage 3 endpoint — kept so existing test scripts keep working.
-     * Internally just calls the generic dispatch with provider='brave'.
      */
     public function testBrave(): void
     {
@@ -50,13 +58,10 @@ class OrbitTestController
      *
      * Body:
      * {
-     *   "provider": "wikipedia" | "wikidata" | "github" | "brave",
-     *   "query":    "Charlotte Tilbury Magic Cream review",
+     *   "provider": "brave"|"wikipedia"|"wikidata"|"github"|"crossref"|"openalex"|"pubmed"|"arxiv"|"zenodo",
+     *   "query":    "...",
      *   "options":  { ... provider-specific ... }
      * }
-     *
-     * The "options" object is passed straight through to the provider's
-     * search() method. See each provider's class docblock for valid keys.
      */
     public function testSearch(): void
     {
@@ -162,9 +167,24 @@ class OrbitTestController
                 $token = (string) env('GITHUB_TOKEN', '');
                 return new GitHubSearchProvider($token !== '' ? $token : null);
 
+            case 'crossref':
+                return new CrossrefSearchProvider();
+
+            case 'openalex':
+                return new OpenAlexSearchProvider();
+
+            case 'pubmed':
+                return new PubMedSearchProvider();
+
+            case 'arxiv':
+                return new ArxivSearchProvider();
+
+            case 'zenodo':
+                return new ZenodoSearchProvider();
+
             default:
                 throw new InvalidArgumentException(
-                    "Unknown provider '{$name}'. Valid: brave, wikipedia, wikidata, github."
+                    "Unknown provider '{$name}'. Valid: brave, wikipedia, wikidata, github, crossref, openalex, pubmed, arxiv, zenodo."
                 );
         }
     }
