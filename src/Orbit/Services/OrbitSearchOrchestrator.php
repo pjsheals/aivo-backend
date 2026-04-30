@@ -1256,6 +1256,48 @@ final class OrbitSearchOrchestrator
                 ->orderByDesc('survival_gap')
                 ->get();
 
+            // Stage 9.1 fallback: if the requested audit has zero classifications
+            // (e.g. it was created but never had M1 run, or M1 hasn't completed
+            // yet), fall back to the most recent audit for the same brand that
+            // DOES have classifications matching this filter. This unblocks
+            // ORBIT for legacy data and partially-completed audits while still
+            // respecting brand_id boundaries (no cross-brand contamination).
+            //
+            // Logged so we can trace which audits are hitting the fallback —
+            // those audits should ideally have M1 re-run on them.
+            $fallbackAuditId = null;
+            if ($classifications->isEmpty()) {
+                $fallbackRow = Capsule::table('meridian_filter_classifications')
+                    ->select('audit_id')
+                    ->where('brand_id', $brandId)
+                    ->where('audit_id', '!=', $auditId)
+                    ->whereRaw("evidence_gaps::text != '[]'")
+                    ->whereRaw(
+                        "EXISTS (SELECT 1 FROM jsonb_array_elements(evidence_gaps::jsonb) AS g WHERE UPPER(g->>'filter') = ?)",
+                        [$filterType]
+                    )
+                    ->orderByDesc('audit_id')
+                    ->first();
+
+                if ($fallbackRow) {
+                    $fallbackAuditId = (int) $fallbackRow->audit_id;
+                    error_log(sprintf(
+                        '[ORBIT] No classifications on audit %d for brand %d. Falling back to audit %d for filter %s.',
+                        $auditId,
+                        $brandId,
+                        $fallbackAuditId,
+                        $filterType
+                    ));
+
+                    $classifications = Capsule::table('meridian_filter_classifications')
+                        ->where('audit_id', $fallbackAuditId)
+                        ->where('brand_id', $brandId)
+                        ->orderByDesc('confidence_score')
+                        ->orderByDesc('survival_gap')
+                        ->get();
+                }
+            }
+
             $matchedClassification = null;
             $gapDescription        = null;
             $displacingBrand       = null;
@@ -1277,6 +1319,8 @@ final class OrbitSearchOrchestrator
             }
 
             if (!$matchedClassification) {
+                // After fallback attempt, still nothing — genuinely no
+                // classification data anywhere for this brand+filter.
                 throw new RuntimeException(
                     "No classification data found for filter {$filterType} on brand {$brandId}, audit {$auditId}. "
                     . "Run M1 classification first."
