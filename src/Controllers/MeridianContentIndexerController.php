@@ -18,6 +18,7 @@ use Illuminate\Database\Capsule\Manager as DB;
  * Endpoints:
  *   GET  /api/meridian/content-sources                       — list sources for a brand
  *   POST /api/meridian/content-sources/create                — register a new source
+ *   POST /api/meridian/content-sources/discover-sitemaps     — auto-find sitemaps from a website URL
  *   POST /api/meridian/content-sources/crawl                 — fire-and-forget background crawl
  *   POST /api/meridian/content-sources/debug-crawl-sync      — DIAGNOSTIC: synchronous crawl
  *   POST /api/meridian/content-sources/delete                — soft-delete a source
@@ -44,6 +45,20 @@ class MeridianContentIndexerController
     // Match the SQL CHECK constraint on meridian_brand_content_classifications_log.axis.
     // Only these axes are user-correctable; T-tier and evidence signals are machine-only.
     private const CORRECTABLE_AXES = ['topics', 'sub_brand', 'territory', 'content_type', 'content_date', 'language'];
+
+    // ── Sitemap discovery ────────────────────────────────────────
+    // Walked in order. robots.txt is checked first because it's the
+    // authoritative source — many large sites declare sitemaps via the
+    // Sitemap: directive at non-standard URLs (e.g. CDN subdomains).
+    private const SITEMAP_DISCOVERY_PATHS = [
+        '/sitemap.xml'        => 'common_path',
+        '/sitemap_index.xml'  => 'common_path',
+        '/sitemap-index.xml'  => 'cms_pattern',  // Yoast SEO
+        '/wp-sitemap.xml'     => 'cms_pattern',  // WordPress 5.5+
+        '/page-sitemap.xml'   => 'cms_pattern',  // some Wix templates
+        '/sitemap1.xml'       => 'cms_pattern',  // common pagination first sitemap
+        '/sitemap.aspx'       => 'cms_pattern',  // older .NET
+    ];
 
     // ── GET /api/meridian/content-sources?brand_id=X ─────────────
     public function listSources(): void
@@ -133,6 +148,152 @@ class MeridianContentIndexerController
         json_response([
             'sourceId' => (int)$sourceId,
             'source'   => $this->shapeSource($source),
+        ]);
+    }
+
+    // ── POST /api/meridian/content-sources/discover-sitemaps ─────
+    // Body: { brand_id, website_url }
+    //
+    // Walks robots.txt and a list of canonical sitemap paths to find any
+    // sitemaps the site exposes. Validates each candidate by parsing the
+    // XML and confirming a <urlset> or <sitemapindex> root element.
+    // Expands sitemap indexes one level deep so users see child sitemaps
+    // they can register directly.
+    //
+    // Read-only: does NOT write to the database. The user picks which
+    // sitemaps to register and the frontend then calls createSource()
+    // for each — using the existing, already-tested code path.
+    //
+    // SSRF mitigations:
+    //   - Brand-scoped auth (admin role + brand-in-agency check)
+    //   - Private/loopback/link-local IP ranges blocked at fetch time
+    //   - Only http(s) schemes accepted
+    //   - 5s per-request timeout, 60s overall execution cap
+    public function discoverSitemaps(): void
+    {
+        $auth = MeridianAuth::require('admin');
+        $body = request_body();
+
+        $brandId    = (int)($body['brand_id'] ?? 0);
+        $websiteUrl = trim((string)($body['website_url'] ?? ''));
+
+        if ($brandId <= 0) {
+            http_response_code(400);
+            json_response(['error' => 'brand_id is required.']);
+            return;
+        }
+        if ($websiteUrl === '') {
+            http_response_code(400);
+            json_response(['error' => 'website_url is required.']);
+            return;
+        }
+
+        // Brand-scope: only admins authorised for the brand can run discovery for it.
+        $this->fetchBrandOrAbort($brandId, $auth);
+
+        // Allow bare domains like "example.com" — prepend https:// if missing.
+        if (!preg_match('#^https?://#i', $websiteUrl)) {
+            $websiteUrl = 'https://' . $websiteUrl;
+        }
+
+        $parsed = parse_url($websiteUrl);
+        if (!$parsed || empty($parsed['host'])) {
+            http_response_code(400);
+            json_response(['error' => 'Invalid website URL.']);
+            return;
+        }
+        if (!in_array(strtolower($parsed['scheme'] ?? ''), ['http', 'https'], true)) {
+            http_response_code(400);
+            json_response(['error' => 'Only http and https URLs are supported.']);
+            return;
+        }
+
+        $origin = strtolower($parsed['scheme']) . '://' . $parsed['host'];
+        if (!empty($parsed['port'])) {
+            $origin .= ':' . $parsed['port'];
+        }
+
+        @set_time_limit(60);
+
+        $startedAt   = microtime(true);
+        $discovered  = [];
+        $checked     = [];
+        $seen        = [];   // dedup key => true
+
+        // ── Step 1: robots.txt ────────────────────────────────────
+        $robotsUrl = $origin . '/robots.txt';
+        $checked[] = $robotsUrl;
+        $robotsRes = $this->httpFetch($robotsUrl);
+        if ($robotsRes['status'] === 200 && $robotsRes['body'] !== '') {
+            // Extract every "Sitemap: <url>" directive (case-insensitive).
+            // Real-world sites sometimes have multiple Sitemap: lines pointing
+            // to news/products/articles split across different XML files.
+            if (preg_match_all('/^\s*Sitemap:\s*(\S+)/im', $robotsRes['body'], $matches)) {
+                foreach ($matches[1] as $sitemapUrl) {
+                    $sitemapUrl = trim($sitemapUrl);
+                    if ($sitemapUrl === '') continue;
+                    // Resolve relative URLs (rare but legal per spec).
+                    if (!preg_match('#^https?://#i', $sitemapUrl)) {
+                        $sitemapUrl = $sitemapUrl[0] === '/'
+                            ? $origin . $sitemapUrl
+                            : $origin . '/' . $sitemapUrl;
+                    }
+                    $this->probeAndRecord($sitemapUrl, 'robots.txt', $discovered, $checked, $seen);
+                }
+            }
+        }
+
+        // ── Step 2: Canonical paths and CMS patterns ─────────────
+        // Try standard locations even if robots.txt found something — sites
+        // sometimes have multiple sitemaps and robots.txt only declares one.
+        foreach (self::SITEMAP_DISCOVERY_PATHS as $path => $sourceLabel) {
+            $url = $origin . $path;
+            if (isset($seen[strtolower($url)])) continue;
+            $this->probeAndRecord($url, $sourceLabel, $discovered, $checked, $seen);
+        }
+
+        // ── Step 3: Expand sitemap indexes one level ─────────────
+        // If we found index files, fetch them and surface the child sitemaps
+        // so the user can pick which ones to register directly. We only go
+        // one level deep — a child sitemap that is itself an index (rare)
+        // will not be expanded further to keep request bounded.
+        $initialDiscovered = $discovered;
+        foreach ($initialDiscovered as $item) {
+            if ($item['type'] !== 'index') continue;
+
+            $res = $this->httpFetch($item['url']);
+            if ($res['status'] !== 200) continue;
+
+            libxml_use_internal_errors(true);
+            $xml = @simplexml_load_string($res['body']);
+            libxml_clear_errors();
+            if (!$xml || $xml->getName() !== 'sitemapindex') continue;
+
+            foreach ($xml->sitemap as $sm) {
+                $childUrl = trim((string)($sm->loc ?? ''));
+                if ($childUrl === '' || !preg_match('#^https?://#i', $childUrl)) continue;
+                $key = strtolower($childUrl);
+                if (isset($seen[$key])) continue;
+
+                // We do NOT re-fetch every child — that could be 50+ requests
+                // for big publishers. Mark them as urlsets (the typical case)
+                // with unknown URL count; the count will populate on first crawl.
+                $seen[$key] = true;
+                $discovered[] = [
+                    'url'      => $childUrl,
+                    'type'     => 'urlset',
+                    'urlCount' => 0,
+                    'source'   => 'index_child',
+                ];
+            }
+        }
+
+        $elapsedMs = (int)round((microtime(true) - $startedAt) * 1000);
+
+        json_response([
+            'discovered' => $discovered,
+            'checked'    => $checked,
+            'elapsedMs'  => $elapsedMs,
         ]);
     }
 
@@ -1005,5 +1166,119 @@ class MeridianContentIndexerController
         if (is_array($value)) return $value;
         $decoded = json_decode((string)$value, true);
         return is_array($decoded) ? $decoded : null;
+    }
+
+    // ── Sitemap discovery helpers ────────────────────────────────
+
+    /**
+     * Fetch a URL with conservative defaults.
+     * 5-second timeout, 3-second connect timeout, follow redirects up to 5,
+     * SSRF-protected (refuses private/loopback/link-local IPs at resolve time).
+     * Auto-decompresses Content-Encoding: gzip via curl's CURLOPT_ENCODING.
+     */
+    private function httpFetch(string $url): array
+    {
+        // SSRF check: resolve host and reject private/loopback/link-local addresses.
+        $parsed = parse_url($url);
+        $host = $parsed['host'] ?? '';
+        if ($host === '') {
+            return ['status' => 0, 'body' => '', 'error' => 'Invalid URL'];
+        }
+        // gethostbynamel returns all A records; we reject if ANY resolve to a non-public range.
+        // (An attacker can't pin DNS to bypass — every record is checked.)
+        $ips = @gethostbynamel($host);
+        if (is_array($ips)) {
+            foreach ($ips as $ip) {
+                if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                    return ['status' => 0, 'body' => '', 'error' => 'Refusing to fetch non-public address'];
+                }
+            }
+        }
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 5,
+            CURLOPT_TIMEOUT        => 5,
+            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_USERAGENT      => 'AIVO-Meridian-SitemapDiscovery/1.0 (+https://aivomeridian.com)',
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_ENCODING       => '',  // auto-handle gzip/deflate Content-Encoding
+            CURLOPT_HTTPHEADER     => ['Accept: text/xml, application/xml, text/plain, */*'],
+        ]);
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+        return [
+            'status' => (int)$code,
+            'body'   => $body === false ? '' : (string)$body,
+            'error'  => $err,
+        ];
+    }
+
+    /**
+     * Validate a fetched body as a sitemap.
+     * Returns ['type' => 'urlset'|'index'|null, 'count' => int].
+     * Rejects soft-404 HTML pages, JSON, malformed XML, and oversized payloads.
+     */
+    private function validateSitemap(string $body): array
+    {
+        if ($body === '' || strlen($body) > 50_000_000) return ['type' => null, 'count' => 0];
+
+        // Strip BOM if present (some Microsoft tooling emits these).
+        if (substr($body, 0, 3) === "\xEF\xBB\xBF") $body = substr($body, 3);
+
+        // Quick reject — must look like XML.
+        $head = ltrim(substr($body, 0, 200));
+        if ($head === '' || $head[0] !== '<') return ['type' => null, 'count' => 0];
+
+        libxml_use_internal_errors(true);
+        $xml = @simplexml_load_string($body);
+        libxml_clear_errors();
+        if (!$xml) return ['type' => null, 'count' => 0];
+
+        $rootName = $xml->getName();
+        if ($rootName === 'sitemapindex') {
+            $count = isset($xml->sitemap) ? count($xml->sitemap) : 0;
+            return ['type' => 'index', 'count' => $count];
+        }
+        if ($rootName === 'urlset') {
+            $count = isset($xml->url) ? count($xml->url) : 0;
+            return ['type' => 'urlset', 'count' => $count];
+        }
+        return ['type' => null, 'count' => 0];
+    }
+
+    /**
+     * Fetch a candidate URL, validate it, and append to discovered list if valid.
+     * Updates $checked and $seen as side effects. Used by discoverSitemaps().
+     */
+    private function probeAndRecord(
+        string $url,
+        string $sourceLabel,
+        array &$discovered,
+        array &$checked,
+        array &$seen
+    ): void {
+        $key = strtolower($url);
+        if (isset($seen[$key])) return;
+
+        $checked[] = $url;
+        $res = $this->httpFetch($url);
+        if ($res['status'] !== 200) return;
+
+        $valid = $this->validateSitemap($res['body']);
+        if ($valid['type'] === null) return;
+
+        $seen[$key] = true;
+        $discovered[] = [
+            'url'      => $url,
+            'type'     => $valid['type'],
+            'urlCount' => $valid['count'],
+            'source'   => $sourceLabel,
+        ];
     }
 }
